@@ -1,0 +1,774 @@
+---
+title: "Fig5 important clusters"
+author: "Yiming Zhang"
+date: "2020/5/21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r include=FALSE}
+library(Seurat)
+library(ggplot2)
+library(openxlsx)
+library(ComplexHeatmap)
+library(circlize)
+library(dplyr)
+library(destiny)
+library(ggrastr)
+library(viridis)
+library(scatterpie)
+library(reshape2)
+library(wesanderson)
+library(VennDiagram)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(tsidx)
+
+extrafont::loadfonts()
+# A list of cell cycle markers, from Tirosh et al, 2015, is loaded with Seurat.  We can
+# segregate this list into markers of G2/M phase and markers of S phase
+s.genes <- cc.genes$s.genes
+g2m.genes <- cc.genes$g2m.genes
+```
+
+
+```{r}
+calculate_cluster_markers <- function(obj, ident, cores = 4) {
+    registerDoMC(cores)
+    
+    res = foreach (i = unique(obj@meta.data[, ident]), .combine = "rbind") %dopar% {
+        tryCatch({
+            temp = FindMarkers(obj, logfc.threshold = 0, ident.1 = i, group.by = ident)
+            temp$ident = i
+            temp$gene = rownames(temp)
+            return(temp)
+        }, error = function(e) { })
+
+    }
+    return (res)
+}
+
+
+plot.DPTRast <- function(
+	x, root = NULL,
+	paths_to = integer(0L),
+	dcs = 1:2,
+	divide = integer(0L),
+	w_width = .1,
+	col_by = 'dpt',
+	col_path = rev(palette()),
+	col_tip = 'red',
+	...,
+	col = NULL,
+	legend_main = col_by
+) {
+	dpt <- x
+	dpt_flat <- branch_divide(dpt, divide)
+	
+	if (!is.null(root) && length(root) < 1L) stop('root needs to be specified')
+	root <-
+		if (is.null(root)) min(dpt_flat@branch[, 1], na.rm = TRUE)
+		else as.integer(root)
+	paths_to <- as.integer(paths_to)
+	
+	if (length(root) > 1L && length(paths_to) > 0L)
+		stop('(length(root), length(paths_to)) needs to be (1, 0-n) or (2-n, 0), but is (', length(root), ', ', length(paths_to), ')')
+	stopifnot(length(dcs) %in% 2:3)
+	
+	if (length(root) > 1L && length(paths_to) == 0L) {
+		paths_to <- root[-1]
+		root <- root[[1]]
+	}
+	
+	pt_vec <- dpt_for_branch(dpt_flat, root)
+	
+	evs <- flipped_dcs(dpt@dm, dcs)
+	
+	plot_paths <- function(p, ..., rescale) {
+		plot_points <- get_plot_fn_rast(p)
+		rescale_fun <-
+			if (is.null(rescale)) identity
+			else function(x) rescale_mat(x, rescale)
+		
+		for (b in seq_along(paths_to)) {
+			idx <- dpt@branch[, 1] %in% c(root, paths_to[[b]])
+			path <- average_path(pt_vec[idx], evs[idx, ], w_width)
+			p <- plot_points(p, rescale_fun(path), type = 'l', col = col_path[[b]], ...)
+		}
+		
+		tips <- evs[dpt_flat@tips[, 1], ]
+		p <- plot_points(p, rescale_fun(tips), col = col_tip, ...)
+		
+		if (!is(p, 'ggplot')) p
+		else p + scale_colour_identity(
+			name = 'Path and Tips', guide = 'legend',
+			breaks = c(col_path[seq_along(paths_to)], col_tip),
+			labels = c(sprintf('Path to %s', paths_to), 'Tips'))
+	}
+	
+	col <-
+		if (!is.null(col)) col
+		else switch(col_by,
+			dpt    = pt_vec,
+			branch = ,
+			Branch = dpt_flat@branch[, 1],
+			dpt[[col_by]])
+	
+	legend_main <- switch(legend_main, dpt = 'DPT', branch = 'Branch', legend_main)
+	
+	args <- list(
+		dpt@dm, dcs,
+		plot_more = plot_paths,
+		legend_main = legend_main,
+		col = col, legend_name = col_by,
+		...)
+	
+	if (!identical(Sys.getenv('LOG_LEVEL'), '')) message('Args:\n', paste(capture.output(print(args)), collapse = '\n'))
+	do.call(plot, args)
+}
+
+
+
+get_plot_fn_rast <- function(p) {
+	if (is(p, 'ggplot')) {  # ggplot
+		function(p2, dat, type = 'p', col, ...) {
+			xy <- colnames(dat)
+			geom <- switch(type, p = geom_point_rast, l = geom_path, stop)
+			p2 + geom(aes_string(xy[[1L]], xy[[2L]], colour = 'Path'), data.frame(dat, Path = col))
+		}
+	} else if (is.list(p) && 'points3d' %in% names(p)) {# scatterplot3d
+		function(p2, ...) {
+			p2$points3d(...)
+			p2
+		}
+	} else if (is(p, 'rglHighlevel')) {  # rgl
+		function(p2, x, y = NULL, z = NULL, type = 'p', ...) {
+			switch(type, p = rgl::points3d, l = rgl::lines3d, stop)(x, y, z, ...)
+			p2
+		}
+	} else stop('unknown p passed to plot_more (class(es): ', paste(class(p), collapse = ', '), ')')
+}
+
+environment(get_plot_fn_rast) <- asNamespace('destiny')
+environment(plot.DPTRast) <- asNamespace('destiny')
+
+
+
+plotDimRast <- function (object, label, label.type = "search", reduction.use = c("tsne", 
+                                                                                  "pca", "dm"), dim.x = 1, dim.y = 2, colors = NULL, discrete.colors = NULL, 
+                          point.size = 1, alpha = 1, point.shapes = F, plot.title = label, 
+                          legend = T, legend.title = "", legend.point.size = 3 * point.size, 
+                          label.clusters = F, cells = NULL, x.lim = NULL, y.lim = NULL, 
+                          color.lim = NULL, na.rm = F, transitions.plot = 0, transitions.alpha = 0.5, 
+                          transitions.df = NULL) 
+{
+    if (length(reduction.use) > 1) 
+        reduction.use <- reduction.use[1]
+    if (tolower(reduction.use) == "tsne") {
+        data.plot <- object@tsne.y
+        if (dim.x > dim(data.plot)[2] | dim.y > dim(data.plot)[2]) 
+            stop("Dimensions requested were not previously calculated.")
+        dim.x <- paste0("tSNE", dim.x)
+        dim.y <- paste0("tSNE", dim.y)
+    }
+    else if (tolower(reduction.use) == "pca") {
+        data.plot <- object@pca.scores
+        if (dim.x > dim(data.plot)[2] | dim.y > dim(data.plot)[2]) 
+            stop("Dimensions requested were not previously calculated.")
+        dim.x <- paste0("PC", dim.x)
+        dim.y <- paste0("PC", dim.y)
+        data.plot <- data.plot[, c(dim.x, dim.y)]
+    }
+    else if (tolower(reduction.use) == "dm") {
+        data.plot <- object@dm@eigenvectors
+        if (dim.x > dim(data.plot)[2] | dim.y > dim(data.plot)[2]) 
+            stop("Dimensions requested were not previously calculated.")
+        dim.x <- paste0("DC", dim.x)
+        dim.y <- paste0("DC", dim.y)
+        data.plot <- as.data.frame(data.plot[, c(dim.x, dim.y)])
+    }
+    else {
+        stop("The reduction provided is invalid.")
+    }
+    sig.score <- data.for.plot(object, label = label, label.type = label.type, 
+                               as.color = F, as.discrete.list = T)
+    data.plot$SIG <- sig.score[[2]][rownames(data.plot)]
+    if (na.rm) {
+        data.plot <- data.plot[complete.cases(data.plot), ]
+    }
+    if (!is.null(cells)) {
+        cells <- intersect(cells, rownames(data.plot))
+        data.plot <- data.plot[cells, ]
+    }
+    if (is.null(transitions.plot) || transitions.plot > 0 || 
+        !is.null(transitions.df)) {
+        if (is.null(transitions.df)) 
+            transitions.df <- edgesFromDM(object, cells = rownames(data.plot), 
+                                          edges.return = transitions.plot)
+        transitions.df$x1 <- data.plot[transitions.df$from, dim.x]
+        transitions.df$x2 <- data.plot[transitions.df$to, dim.x]
+        transitions.df$y1 <- data.plot[transitions.df$from, dim.y]
+        transitions.df$y2 <- data.plot[transitions.df$to, dim.y]
+        transitions.df$alpha <- transitions.df$weight/max(transitions.df$weight) * 
+            transitions.alpha
+    }
+    this.plot <- ggplot(data = data.plot, aes_string(x = dim.x, 
+                                                     y = dim.y))
+    if (!is.null(transitions.df)) 
+        this.plot <- this.plot + geom_segment(inherit.aes = F, 
+                                              data = transitions.df, aes(x = x1, y = y1, xend = x2, 
+                                                                         yend = y2, alpha = alpha))
+    if (sig.score[[1]]) {
+        if (point.shapes) {
+            shape.rep <- ceiling(length(unique(data.plot$SIG))/4) + 
+                1
+            this.plot <- this.plot + geom_point_rast(aes(color = SIG, 
+                                                         shape = SIG), size = point.size, alpha = alpha) + 
+                scale_shape_manual(values = rep(c(0, 2, 8, 9), 
+                                                shape.rep))
+        }
+        else {
+            this.plot <- this.plot + geom_point_rast(aes(color = SIG), 
+                                                     size = point.size, alpha = alpha, stroke = 0)
+        }
+        if (!is.null(discrete.colors)) {
+            this.plot <- this.plot + scale_color_manual(values = discrete.colors)
+        }
+    }
+    else {
+        if (is.null(colors)) 
+            colors <- defaultURDContinuousColors()
+        this.plot <- this.plot + geom_point_rast(aes(color = SIG), 
+                                                 size = point.size) + scale_color_gradientn(colors = colors, 
+                                                                                            limits = color.lim)
+    }
+    this.plot <- this.plot + labs(title = plot.title, color = legend.title, 
+                                  shape = legend.title)
+    this.plot <- this.plot + theme_bw() + theme(panel.grid.minor = element_blank(), 
+                                                panel.grid.major = element_blank(), plot.title = element_text(face = "bold"))
+    if (label.clusters && sig.score[[1]]) {
+        data.plot$CLUSTER <- data.plot$SIG
+        k.centers <- aggregate(data.plot[, 1:2], by = list(data.plot$CLUSTER), 
+                               FUN = "mean")
+        this.plot <- this.plot + geom_label(data = k.centers, 
+                                            aes_string(x = dim.x, y = dim.y, label = "Group.1"), 
+                                            color = "black", alpha = 0.6, show.legend = F)
+    }
+    if (!legend) {
+        this.plot <- this.plot + guides(color = FALSE, shape = FALSE)
+    }
+    else if (sig.score[[1]]) {
+        this.plot <- this.plot + guides(color = guide_legend(override.aes = list(size = legend.point.size)))
+    }
+    this.plot <- this.plot + guides(alpha = F)
+    if (!is.null(x.lim)) 
+        this.plot <- this.plot + xlim(x.lim[1], x.lim[2])
+    if (!is.null(y.lim)) 
+        this.plot <- this.plot + ylim(y.lim[1], y.lim[2])
+    return(this.plot)
+}
+
+environment(plotDimRast) <- asNamespace('URD')
+
+
+gg_color_hue <- function(n) {
+    hues = seq(15, 375, length = n + 1)
+    hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+
+make_dm_plot <- function(axial, output = NULL, title = "", dims = 6) {
+    mtx = as.data.frame(axial@dm@eigenvectors)
+    
+    mtx$subtype <- axial@meta[rownames(mtx), "subtype"]
+    
+    for(i in seq(1, dims, 2)) {
+        temp <- mtx[, c(paste0("DC", i), paste0("DC", i + 1), "subtype")]
+        colnames(temp) <- c("DC1", "DC2", "group")
+        
+        p <- ggplot(temp, aes(x=DC1, y = DC2, color = group)) +
+            geom_point_rast(size = .3) +
+            scale_color_manual(values = c(
+              "Normal"="#3BAAD2", "Adjacent"="#4EAE4A", 
+              "Primary"="#E79129", "Metastasis"="#C82A2D"
+            )) +
+            theme_bw(base_family = "Arial Unicode MS") +
+            theme(
+                aspect.ratio = 1,
+                legend.position = c(0.5, 0.1),
+                axis.text = element_text(size = 15),
+                axis.title = element_text(size = 18),
+                legend.text = element_text(size = 15),
+                legend.background = element_blank(),
+                plot.title = element_text(size = 15),
+                plot.subtitle = element_text(size = 10),
+                panel.grid = element_blank()
+            ) +
+            guides(color = guide_legend(nrow = 1, override.aes = list(size = 5))) +
+            labs(
+                color = "",
+                x = paste0("DC", i), 
+                y = paste0("DC", i + 1), 
+                title = title
+            )
+        
+        if (is.null(output)) {
+            print(p)
+        } else {
+            ggsave(
+                filename = paste0(output, "_DM_", i, ".pdf"),
+                plot = p,
+                width = 6,
+                height = 7, device = cairo_pdf
+            )
+        }
+    }
+    
+}
+
+
+make_scatterpie_plot <- function(
+    object, 
+    color="Disease", 
+    alpha=0.8, 
+    colors=colors, 
+    pt.size = 0.1, 
+    guide_ncol=1,
+    text_size = 8,
+    reduction.use = "tsne",
+    r=0.05,
+    legend.position="none",
+    legend.direction="horizontal",
+    legend.breaks=waiver(),
+    custom_pos = NULL,
+    legend.text = 15
+) {
+    meta = object@meta.data
+    meta$ident = meta$group
+
+    coord = object@reductions[[reduction.use]]@cell.embeddings
+    colnames(coord) = c("x", "y")
+
+    meta = merge(meta, coord, by = 0)
+
+    scatter = eval(
+        parse(
+            text=paste0(
+                "meta %>% group_by(ident, ", color, ") %>% add_tally() %>% group_by(ident) %>% mutate(x1 = median(x), y1 = median(y), perc = n / sum(n)) %>% dplyr::select(ident, x1, y1, perc, ", color, ") %>% unique()"
+            )
+        )
+    )
+
+    colnames(scatter)[colnames(scatter) == color] = "group"
+
+    scatter = dcast(scatter, ident + x1 + y1 ~ group, value.var="perc")
+
+    scatter[is.na(scatter)] = 0
+    scatter$r = min(max(meta$x) - min(meta$x), max(meta$y) - min(meta$y)) * r
+
+    clt_color = gg_color_hue(length(unique(meta$ident)))
+    names(clt_color) = 1:length(unique(meta$ident))
+    print(clt_color)
+    if (!is.null(custom_pos)) {
+        scatter$x1 = custom_pos[scatter$ident, "x1"]
+        scatter$y1 = custom_pos[scatter$ident, "y1"]
+    }
+
+    p <- ggplot() + 
+        geom_point_rast(
+            aes(x=x, y=y, colour=factor(ident)), 
+            data=meta, 
+            alpha=alpha, 
+            size=pt.size
+        ) +
+        geom_scatterpie(
+            aes(
+                x=x1,
+                y=y1, 
+                group=ident,
+                r=r
+            ),
+            data=scatter,
+            cols=as.character(unique(meta[, color])),
+            color=NA
+        ) +
+        coord_equal() +
+        geom_text(
+            aes(x=x1, y=y1 - r - 0.5, label=ident),
+            data=scatter,
+            size = text_size
+        ) +
+        theme_bw() +
+        theme(
+            aspect.ratio = 1, panel.grid = element_blank(),
+            legend.position = legend.position,
+            axis.text = element_text(size = 15),
+            axis.title = element_text(size = 20),
+            legend.text = element_text(size = legend.text),
+            # legend.background = element_blank()
+            legend.direction=legend.direction,
+            legend.spacing.x = unit(0.1, 'cm')
+        ) +
+        scale_color_manual(values=clt_color, breaks = c()) + 
+        scale_fill_manual(values=colors, breaks = legend.breaks) +
+        guides(fill = guide_legend(ncol = guide_ncol))
+
+    if (reduction.use == "tsne") {
+        p <- p + labs(x="tSNE_1", y="tSNE_2", color="", fill = "")
+    } else if (reduction.use == "umap") {
+        p <- p + labs(x="UMAP1", y="UMAP2", color="", fill="")
+    }
+
+    return(p)
+}
+```
+
+
+## Ductal2
+```{r}
+obj <- readRDS("CNV/Ductal_2/seurat.rds")
+```
+
+
+```{R}
+markers <- read.xlsx("meta/Ductal 2转移相关基因及参考文献.xlsx")
+markers = markers[markers$gene %in% rownames(obj@assays$RNA@scale.data), ]
+
+classical_markers <- read.xlsx("meta/转移经典markers.xlsx")
+classical_markers = classical_markers[classical_markers$gene %in% rownames(obj@assays$RNA@scale.data), ]
+
+markers = readRDS("CNV/Ductal_2/cluster_markers.rds")
+markers = markers[markers$p_val_adj < 0.05 & markers$avg_logFC > 0.25, ]
+```
+
+
+```{r fig.height=8, fig.width=6}
+gene = list()
+for (i in unique(markers$ident)) {
+  gene[[paste0("C", i)]] =  markers$gene[markers$ident ==  i]
+}
+
+go = compareCluster(gene, fun = enrichGO, OrgDb = org.Hs.eg.db, keyType = "SYMBOL", ont = "BP")
+go@compareClusterResult$Cluster = factor(go@compareClusterResult$Cluster, levels = paste0("C", seq(1, 6)))
+saveRDS(go, "CNV/Ductal_2/cluster_go.rds")
+
+ggsave(
+  filename = "CNV/Ductal_2/cluster_go.pdf",
+  plot = dotplot(go), width = 6, height = 8
+)
+
+```
+
+
+#### DM
+
+```{r fig.height=4, fig.width=4}
+dm <- readRDS("CNV/Ductal_2/URD/dm.rds")
+dm <- as.data.frame(dm@eigenvectors)
+dm$subtype <- obj@meta.data[rownames(dm), "subtype"]
+dm$patient_id <- obj@meta.data[rownames(dm), "patient_id"]
+
+ggplot(dm, aes(x=DC1, y=DC2, color = subtype)) +
+    geom_point_rast(size = 0.1) +
+    theme_bw() +
+    theme(
+        panel.grid = element_blank(),
+        aspect.ratio = 1,
+        legend.position = c(0.6, 0.15),
+        legend.direction = "horizontal",
+        legend.text = element_text(size = 12),
+        legend.background = element_blank(),
+        axis.text = element_text(size = 15),
+        axis.title = element_text(size = 15)
+    ) +
+    guides(color = guide_legend(override.aes = list(size = 5), nrow = 3)) +
+    scale_color_manual(values = c(
+            "Normal"="#3BAAD2", "Adjacent"="#4EAE4A", 
+            "Primary"="#E79129", "Metastasis"="#C82A2D",
+            "Tumor"="grey"
+    )) +
+    labs(color = "") +
+    scale_x_continuous(breaks = seq(-0.015, 0.01, 0.01))
+
+plist = list()
+for (i in unique(dm$subtype)) {
+    plist[[i]] <- ggplot(dm[dm$subtype == i, ], aes(x=DC1, y=DC2, color = patient_id)) +
+    geom_point_rast(size = 0.1) +
+        labs(title = i) +
+        theme(legend.position = "none")
+}
+
+cowplot::plot_grid(plotlist = plist)
+```
+
+
+```{r fig.height=4, fig.width=5}
+pdf("CNV/Ductal_2/transfer_markers.pdf", width = 4, height = 4)
+for (i in unique(c("KRAS", classical_markers$gene, markers$gene))) {
+    dm$gene = obj@assays$RNA@scale.data[i, rownames(dm)]
+    dm = dm[order(dm$gene, decreasing = F), ]
+    
+    sm = summary(dm$gene[dm$gene > 0])
+    # dm$gene[dm$gene < sm[4]] = 0
+    
+    p <- ggplot() +
+        # geom_point_rast(data=dm[dm$gene < summary(dm$gene)[5], ], aes(x=DC1, y=DC2), size = 0.1) +
+        geom_point_rast(data=dm, aes(x=DC1, y=DC2, color = gene), size = 0.1) +
+        labs(title = i) +
+        scale_color_viridis() +
+        # scale_color_gradient2(low = "grey", mid="grey", high = "blue") +
+        theme_bw() +
+        theme(
+            panel.grid = element_blank(),
+            aspect.ratio = 1,
+            legend.position = c(0.6, 0.15),
+            legend.direction = "horizontal",
+            legend.text = element_text(size = 12),
+            legend.background = element_blank(),
+            axis.text = element_text(size = 15),
+            axis.title = element_text(size = 15)
+        ) +
+        scale_x_continuous(breaks = seq(-0.015, 0.01, 0.01))
+    print(p)
+}
+dev.off()
+```
+
+
+### Plot URD results
+```{r}
+urd <- readRDS("CNV/Ductal_2/URD/URD.rds")
+
+make_dm_plot(urd)
+```
+
+
+```{r fig.height=12, fig.width=6}
+clust_markers <- readRDS("CNV/Ductal_2/cluster_markers.rds")
+
+temp_markers <- clust_markers[clust_markers$avg_logFC > 0.25 & clust_markers$p_val_adj < 0.05, ] %>%
+    group_by(ident) %>%
+    top_n(10, wt = avg_logFC) %>%
+    as.data.frame()
+
+temp_markers = temp_markers[order(temp_markers$ident, decreasing = F), ]
+
+
+DotPlot(obj, features = unique(as.character(temp_markers$gene)), group.by = "group") +
+    coord_flip()
+```
+
+
+```{r fig.height=6, fig.width=6}
+clust_markers <- read.csv("CNV/Ductal_2/markers_between_subtypes.csv", row.names = 1, stringsAsFactors = F)
+
+temp_markers <- clust_markers[clust_markers$avg_logFC > 0.5 & clust_markers$p_val_adj < 0.05, ]
+
+temp_markers = temp_markers[order(temp_markers$ident, decreasing = F), ]
+
+obj@meta.data$subtype = factor(
+    as.character(obj@meta.data$subtype),
+    levels = c("Normal", "Adjacent", "Primary", "Metastasis", "Tumor")
+)
+
+temp_markers$ident = factor(
+    as.character(temp_markers$ident),
+    levels = c("Adjacent-Normal", "Primary-Normal", "Metastasis-Normal", "Metastasis-Primary")
+)
+
+Heatmap(
+    obj@assays$RNA@scale.data[
+        as.character(temp_markers$gene), 
+        rownames(obj@meta.data)[obj@meta.data$source == "WCH"]
+    ],
+    cluster_columns = F, cluster_rows = F,
+    row_split = temp_markers$ident,
+    column_split = obj@meta.data$subtype[obj@meta.data$source == "WCH"],
+    show_row_names = F, show_column_names = F,
+    col = colorRamp2(c(-2, 0, 2), c("purple", "black", "yellow"))
+)
+```
+
+
+## Macrophages
+```{r}
+obj = trqwe::mcreadRDS("CNV/MPP/seurat.rds")
+```
+
+
+### check subtype
+```{R fig.height=4, fig.width=4}
+p <- DimPlot(
+    obj, reduction = "umap", group.by = "subtype",
+    label = T, pt.size = 0.1
+) + theme(legend.position = "none")
+
+print(p)
+```
+
+
+```{r fig.height=4, fig.width=4}
+# obj@meta.data$group[obj@meta.data$group %in% c(1, 4)] = 1
+# obj@meta.data$group[obj@meta.data$group %in% c(3, 6)] = 3
+# 
+p = make_scatterpie_plot(
+    obj, color = "subtype", reduction.use = "umap",
+    colors = c(
+        "Normal"="#3BAAD2", "Adjacent"="#4EAE4A", 
+        "Primary"="#E79129", "Metastasis"="#C82A2D",
+        "Tumor"="grey"
+))
+
+p
+
+ggsave(
+  filename = "CNV/MPP/clusters_pie.pdf",
+  plot = p, width = 4, height = 4
+)
+
+trqwe::mcsaveRDS(obj, "CNV/MPP/seurat1.rds")
+```
+
+
+```{r}
+Idents(obj) <- obj@meta.data$group
+markers = FindAllMarkers(obj)
+
+saveRDS(markers, "CNV/MPP/cluster_markers1.rds")
+```
+
+
+## CellChat
+
+## Overall heatmap
+```{r}
+res = trqwe::mcreadRDS("CNV/MPP/cellchat.rds")
+
+for (i in names(res)) {
+  cellchat = res[[i]]
+  groupSize <- as.numeric(table(cellchat@idents))
+  
+  outdir = paste0("cellchat1/", str_replace(i, "\\s", "_"))
+  dir.create(outdir, showWarnings = F, recursive = T)
+  
+  ht1 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "outgoing", width = 10, height = 15)
+  ht2 <- netAnalysis_signalingRole_heatmap(cellchat, pattern = "incoming", width = 10, height = 15)
+  
+  pdf(paste0(outdir, "/", "heatmap_all_pathway.pdf"), width = 20, height = 15)
+  draw(ht1 + ht2)
+  dev.off()
+
+  pdf(paste0(outdir, "/", "circle_overall_interactions_and_weights.pdf"), width = 12, height = 6)
+  par(mfrow = c(1,2), xpd=TRUE)
+  netVisual_circle(cellchat@net$count, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Number of interactions")
+  netVisual_circle(cellchat@net$weight, vertex.weight = groupSize, weight.scale = T, label.edge= F, title.name = "Interaction weights/strength")
+  dev.off()
+
+
+  mat <- cellchat@net$weight
+
+  pdf(paste0(outdir, "/", "circle_per_cells.pdf"), width = 18, height = 15)
+  par(mfrow = c(5, 6), xpd=TRUE)
+  for (i in 1:nrow(mat)) {
+    mat2 <- matrix(0, nrow = nrow(mat), ncol = ncol(mat), dimnames = dimnames(mat))
+    mat2[i, ] <- mat[i, ]
+    netVisual_circle(mat2, vertex.weight = groupSize, weight.scale = T, edge.weight.max = max(mat), title.name = rownames(mat)[i])
+  }
+  dev.off()
+}
+
+```
+
+
+
+```{r}
+plist = list()
+for (i in unique(cellchat@netP$pathways)) {
+  plist[[i]] = netVisual_bubble(
+    cellchat, 
+    remove.isolate = FALSE,
+    signaling = i, 
+    sources.use = c(6, 7, 8, 9, 10),
+    targets.use = c(6, 7, 8, 9, 10),
+  )
+}
+
+ggsave(
+  filename = "CNV/MPP/cellchat_d2_mpp_pathway1.pdf",
+  plot = cowplot::plot_grid(plotlist = plist, ncol = 4),
+  width = 40,  height = 35
+)
+
+
+
+p = netVisual_bubble(
+  cellchat, 
+  remove.isolate = FALSE,
+  signaling = c("SAA", "GDF", "GAS", "ANNEXIN", "COMPLEMENT"), 
+  sources.use = c(6),
+  targets.use = c(7, 8, 9, 10),
+)
+
+ggsave(
+  filename = "CNV/MPP/cellchat_d26_mpp_bubble.pdf",
+  plot = p,
+  width = 4,  height = 3
+)
+
+```
+
+
+## bigScale2
+
+```{r}
+library(bigSCale)
+library(ggnetwork)
+
+d2  = trqwe::mcreadRDS("CNV/Ductal_2/seurat.rds")
+d2_markers = readRDS("CNV/Ductal_2/cluster_markers.rds")
+
+gs = d2_markers$gene[d2_markers$ident == 6 & abs(d2_markers$avg_logFC) > .25 & d2_markers$p_val_adj < 0.05]
+
+results.ctl=compute.network(expr.data = d2@assays$RNA@data, gene.names = rownames(d2), clustering = "normal", quantile.p = 0.8)
+
+res = list()
+res[["6all"]] = results.ctl
+res[["6all_normal"]] = results.ctl
+trqwe::mcsaveRDS(res, "CNV/Ductal_2/bigscale.rds")
+
+
+res = trqwe::mcreadRDS("CNV/Ductal_2/bigscale.rds")
+temp = res[["6all_normal"]]$centrality
+
+toCytoscape(res[["6all"]]$graph, "CNV/Ductal_2/bigscale.json")
+
+temp = ggnetwork(res[["6all_normal"]]$graph)
+
+p = ggplot(temp, aes(x = x, y = y, xend = xend, yend = yend)) +
+  geom_edges() +
+  geom_nodes(aes(size=bigSCale.Degree)) +
+  geom_nodetext_repel(
+    aes(label = name), 
+    fontface = "bold", 
+    color = "red",
+    data=temp[temp$name %in% c("RPS15A", "IGF2BP3"),]
+  ) +
+  # geom_nodetext_repel(
+  #   aes(label = name), 
+  #   fontface = "bold", 
+  #   color = "grey",
+  #   data=temp[!temp$name %in% c("RPS15A"),]
+  # ) +
+  theme_blank() +
+  scale_colour_gradient(low = "lightgrey", high = "blue")
+print(p)
+
+```
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+

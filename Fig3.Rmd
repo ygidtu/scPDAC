@@ -1,0 +1,387 @@
+---
+title: "Fig3"
+author: "Yiming Zhang"
+date: "2020/5/17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r cars, include=FALSE}
+library(ComplexHeatmap)
+library(circlize)
+library(ggplot2)
+library(reshape2)
+library(stringr)
+library(tsidx)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+
+extrafont::loadfonts()
+```
+
+## Including Plots
+
+
+```{r}
+markers = read.csv("CNV/markers_between_subtypes.csv")
+go = readRDS("go_markers_subtypes.rds")
+```
+
+
+```{r fig.height=8, fig.width=10}
+p <- dotplot(go[["Ductal_2"]], showCategory = 10)
+
+lvls = as.character(unique(p$data$Cluster))
+lvls = c(lvls[!str_detect(lvls, "Meta")], lvls[str_detect(lvls, "Meta")])
+
+
+p$data$Cluster = factor(p$data$Cluster, levels = lvls)
+
+p
+```
+
+
+## bar plot of markers
+```{R fig.height=6, fig.width=8}
+stage = unique(markers)
+stage$type = 0
+stage$type[stage$avg_logFC > 0.25 & stage$p_val_adj < 0.05] = "Up"
+stage$type[stage$avg_logFC < -0.25 & stage$p_val_adj < 0.05] = "Down"
+
+stage = stage[stage$type != 0, ]
+stage = stage[!stage$ident %in% c("Tumor-Normal", "Metastasis-Primary"), ]
+stage$ident = str_replace_all(stage$ident, "-Normal", "")
+
+temp = stage %>%
+    group_by(ident, cell, type) %>%
+    add_tally() %>%
+    dplyr::select(ident, cell, type, n) %>%
+    unique() %>%
+    as.data.frame()
+
+temp$ident = factor(temp$ident, levels = c("Adjacent", "Primary", "Metastasis"))
+
+temp$cell = factor(
+    str_replace_all(as.character(temp$cell), "_", " "),
+    levels = c(
+        "Ductal 1", "Ductal 2", "Acinar", "Endocrine", "Endothelial",
+        "Fibroblasts", "Stellate", "Macrophages", "T cells", "B cells"
+    )
+)
+
+temp$type = factor(temp$type, levels = c("Up", "Down"))
+
+p <- ggbarplot(
+    temp[!temp$cell %in% c("B cells", "Macrophages", "T cells"), ], 
+    x="cell", y="n",
+    fill = "ident", 
+    facet.by = "type", 
+    ncol = 1, 
+    position = position_dodge2(padding = 0.1),
+    xlab = "",
+    ylab = "Number of genes",
+    palette = c(
+        "Normal"="#3BAAD2", "Adjacent"="#4EAE4A",
+        "Primary"="#E79129", "Metastasis"="#C82A2D"
+    ),
+    scales = "free_y"
+) + labs(fill = "") +
+    theme(
+        panel.grid.major.x = element_blank() ,
+        # explicitly set the horizontal lines (or they will disappear too)
+        panel.grid.major.y = element_line( size=.1, color="black" ) 
+    )
+
+p
+
+
+ggsave(
+    filename = "plots/markers_subtypes_bar.pdf",
+    plot = p, width = 8, height = 6
+)
+```
+
+
+## OncoPrint of Stage specific genes
+
+```{R}
+stage = markers
+stage$type = 0
+stage$type[stage$avg_logFC > 0.25 & stage$p_val_adj < 0.05] = 1
+stage$type[stage$avg_logFC < -0.25 & stage$p_val_adj < 0.05] = -1
+
+
+temp = dcast(stage, cell+ident~gene, value.var = "type", fill = 0, fun.aggregate = mean)
+
+temp = temp[, c(T, T, apply(temp[, !colnames(temp) %in% c("cell", "ident")], 2, function(col) { !all(col == 0) }))]
+temp = as.data.frame(temp)
+rownames(temp) <- make.unique(temp$cell)
+temp$cell = str_replace_all(temp$cell, "_", " ")
+temp$cell[temp$cell == "TRUE"] = "T"
+```
+
+
+```{r}
+col = c("Down" = "blue", "Up" = "red", "Unchanged" = "#E0E0E0")
+alter_fun = list(
+    Unchanged = function(x, y, w, h) {
+        grid.rect(x, y, w-unit(2, "pt"), h-unit(2, "pt"), 
+            gp = gpar(fill = col["Unchanged"], col = NA))
+    },
+    # big blue
+    Up = function(x, y, w, h) {
+        grid.rect(x, y, w-unit(2, "pt"), h-unit(2, "pt"), 
+            gp = gpar(fill = col["Up"], col = NA))
+    },
+    # big red
+    Down = function(x, y, w, h) {
+        grid.rect(x, y, w-unit(2, "pt"), h-unit(2, "pt"), 
+            gp = gpar(fill = col["Down"], col = NA))
+    }
+)
+
+heatmap_legend_param = list(
+    title = "", 
+    at = c("Up", "Unchanged", "Down"), 
+    labels = c("Upregulated", "Unchanged", "Downregulated"),
+    labels_gp = gpar(fontfamily = "Arial Unicode MS"),
+    title_gp = gpar(fontfamily = "Arial Unicode MS")
+)
+```
+
+
+```{r}
+temp$cell = factor(
+    str_replace_all(as.character(temp$cell), "_", " "),
+    levels = c(
+        "Ductal 1", "Ductal 2", "Acinar", "Endocrine", "Endothelial",
+        "Fibroblast", "Stellate", "Macrophage", "T", "B"
+    )
+)
+
+ident = as.character(sort(unique(temp$ident)))
+
+temp$cell = as.character(temp$cell)
+temp$ident = as.character(temp$ident)
+
+heatmap_list = list()
+for (i in ident) {
+    print(i)
+    mat = temp[temp$ident == i, ]
+    mat = mat[, c(T, T, apply(mat[, !colnames(mat) %in% c("cell", "ident")], 2, function(col) { sum(abs(as.numeric(col))) > 0 }))]
+    
+    num_rm_cells = abs(nrow(mat) - sum(temp$ident == ident[1]))
+    
+    if (num_rm_cells > 0) {
+        lack_cells = paste(temp$cell[temp$ident == ident[1]])
+        lack_cells = lack_cells[!lack_cells %in% mat$cell]
+        temp_mat = as.data.frame(matrix(data = 0, nrow = length(lack_cells), ncol = ncol(mat)))
+        colnames(temp_mat) = colnames(mat)
+        temp_mat$cell = sapply(lack_cells, function(x) {x})
+        temp_mat$ident = i
+        mat = rbind(mat, temp_mat[, colnames(mat)])
+        mat = mat[order(mat$cell), ]
+        rm(temp_mat)
+        
+        mat$cell = factor(mat$cell, levels = c(
+            "Ductal 1", "Ductal 2", "Acinar", "Endocrine", "Endothelial",
+            "Fibroblast", "Stellate", "Macrophage", "T", "B"
+        ))
+    }
+    
+    rownames(mat) <- mat$cell
+
+    # h <- Heatmap(
+    #     t(apply(mat[, !colnames(mat) %in% c("cell", "ident", "disease")], 1, as.numeric)), 
+    #     name = "1", 
+    #     cluster_rows = F, 
+    #     cluster_columns = T,
+    #     show_column_names = F, show_row_names = F,
+    #     row_split = mat$cell,
+    #     row_title_rot = 0,
+    #     clustering_method_columns = "ward.D"
+    # )
+    
+    hc = hclust(dist(apply(mat[, !colnames(mat) %in% c("cell", "ident", "disease")], 1, as.numeric)), method = "ward.D2")
+    
+    co = hc$order
+
+    mat_plot = mat[, !colnames(mat) %in% c("cell", "ident", "disease")]
+    
+    mat_plot[mat_plot == 0] = "Unchanged"
+    mat_plot[mat_plot == 1] = "Up"
+    mat_plot[mat_plot == -1] = "Down"
+    
+    
+    h <- oncoPrint(
+        mat_plot[, co], 
+        name = i,
+        alter_fun = alter_fun, 
+        col = col,
+        show_heatmap_legend = i == ident[1], 
+        heatmap_legend_param = list(
+            title = "", 
+            at = c("Up", "Unchanged", "Down"), 
+            labels = c("Upregulated", "Unchanged", "Downregulated")
+            # labels_gp = gpar(fontfamily = "Arial Unicode MS"),
+            # title_gp = gpar(fontfamily = "Arial Unicode MS")
+        ),
+        show_pct = F, show_row_names = F,
+        top_annotation = NULL,
+        right_annotation = rowAnnotation(
+            rbar = anno_oncoprint_barplot(
+                type = c("Up", "Down"), border = T
+                # axis_param = list(gp = gpar(fontfamily = "Arial Unicode MS"))
+            )
+            # annotation_legend_param = list(
+            #     labels_gp = gpar(fontfamily = "Arial Unicode MS"),
+            #     title_gp = gpar(fontfamily = "Arial Unicode MS")
+            # )
+        ),
+        #left_annotation = ha,
+        row_split = mat$cell,
+        row_title_gp = gpar(fontfamily = "Arial Unicode MS"),
+        row_title_rot = 0,
+        column_title = i,
+        column_title_gp = gpar(fontfamily = "Arial Unicode MS", fontsize = 15)
+    )
+    
+    heatmap_list[[i]] = h
+}
+
+
+
+ht_list = heatmap_list[["Adjacent-Normal"]] + heatmap_list[["Primary-Normal"]] + heatmap_list[["Metastasis-Normal"]] + heatmap_list[["Metastasis-Primary"]]
+```
+
+
+```{r  fig.height=6, fig.width=12}
+cairo_pdf("plots/Fig3/heatmap_subtype_specific.pdf", width = 16, height = 6)
+draw(ht_list, merge_legend = TRUE)
+dev.off()
+
+draw(ht_list, merge_legend = TRUE)
+```
+
+
+## Compare tau value between different subtypes
+
+```{r eval=FALSE, include=FALSE}
+expr <- readRDS("raw_expr_sparse.rds")
+meta <- readRDS("meta.rds")
+
+tau <- readRDS("tau_all_cell_type.rds")
+markers <- read.csv("each_cells/markers_between_subtypes.csv", row.names = 1, stringsAsFactors = F)
+```
+
+
+```{r}
+temp = markers[markers$avg_logFC > .25 & markers$p_val_adj < 0.05, ]
+temp$Tau = tau[temp$gene, "Tau"]
+```
+
+
+
+```{R fig.height=4, fig.width=8}
+temp$cell = factor(
+    as.character(temp$cell),
+    levels = c(
+        "Ductal 1", "Ductal 2", "Acinar", "Endocrine", "Endothelial",
+        "Fibroblasts", "Stellate", "Macrophages", "T cells", "B cells"
+    )
+)
+
+temp$ident = factor(
+    as.character(temp$ident),
+    levels = c(
+        "Paralle-Normal", "Cancer-Normal", "Transfer-Normal", "Tumor-Normal"
+    )
+)
+
+
+p <- ggplot(temp[temp$ident != "Tumor-Normal", ], aes(x=cell, y=Tau, fill=ident)) +
+    geom_boxplot() +
+    theme_bw(base_family = "Arial Unicode MS") +
+    theme(
+        panel.grid = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        legend.position = "bottom",
+        legend.text = element_text(size = 12)
+    ) +
+    labs(x="", y="", fill="") +
+    scale_fill_manual(values = c(
+        "Normal"="#3BAAD2", "Paralle-Normal"="#4EAE4A",
+        "Cancer-Normal"="#E79129", "Transfer-Normal"="#C82A2D"
+    ))
+
+
+p
+
+ggsave(
+    filename = "plots/Fig3/boxplot_celltypes_deversity.pdf",
+    plot = p, device = cairo_pdf, width = 8, height = 4
+)
+
+```
+
+
+```{r}
+markers <- read.csv("each_cells/markers_between_subtypes.csv", row.names = 1, stringsAsFactors = F)
+
+tau <- readRDS("rds/tsi/subtypes.rds")
+rownames(tau) <- paste(tau$cell, tau$gene)
+```
+
+
+```{R fig.height=4, fig.width=8}
+temp = markers[markers$avg_logFC > .25 & markers$p_val_adj < 0.05, ]
+temp$Tau = tau[paste(temp$cell, temp$gene), "Tau"]
+
+temp$cell = factor(
+    as.character(temp$cell),
+    levels = c(
+        "Ductal 1", "Ductal 2", "Acinar", "Endocrine", "Endothelial",
+        "Fibroblast", "Stellate", "Macrophage", "T", "B"
+    )
+)
+
+temp$ident = factor(
+    as.character(temp$ident),
+    levels = c(
+        "Paralle-Normal", "Cancer-Normal", "Transfer-Normal", "Tumor-Normal"
+    )
+)
+
+
+p <- ggplot(temp[temp$ident != "Tumor-Normal", ], aes(x=cell, y=Tau, fill=ident)) +
+    geom_boxplot() +
+    theme_bw(base_family = "Arial Unicode MS") +
+    theme(
+        panel.grid = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        legend.position = "bottom",
+        legend.text = element_text(size = 12)
+    ) +
+    labs(x="", y="", fill="") +
+    scale_fill_manual(values = c(
+        "Normal"="#3BAAD2", "Paralle-Normal"="#4EAE4A",
+        "Cancer-Normal"="#E79129", "Transfer-Normal"="#C82A2D"
+    ))
+
+p
+
+ggsave(
+    filename = "plots/Fig3/boxplot_subtypes_deversity.pdf",
+    plot = p, device = cairo_pdf, width = 8, height = 4
+)
+```
+
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

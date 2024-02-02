@@ -1,0 +1,975 @@
+---
+title: "Fig2"
+author: "Yiming Zhang"
+date: "2020/5/28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r cars, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+library(ggrastr)
+library(doMC)
+library(stringr)
+library(ggradar)
+library(ggrepel)
+library(TCGAbiolinks)
+library(maftools)
+library(dplyr)
+library(gaia)
+library(progress)
+library(circlize)
+```
+
+
+```{r}
+make_cell_types_plot3 <- function(
+    coord,
+    pt.size = 0.1, 
+    alpha = 0.5,
+    text_size = 10,
+    axis_size = 18,
+    axis_title_size = 20,
+    title_size = 25,
+    group_by = "",
+    label = "cell_name",
+    title = "Cell type",
+    legend.position = "none",
+    colors = NULL
+) {
+    data = coord[, c("UMAP1", "UMAP2", group_by, label)]
+    
+    if (group_by == "") {
+        group_by = "cell_name"
+    }
+    
+    p <- eval(
+        parse(text=paste0(
+                "ggplot(data = data, aes(x=UMAP1, y=UMAP2, color=", group_by, "))"
+            )
+        )
+    )
+    
+    if (!is.null(label)) {
+
+        text_loc = eval(
+            parse(text=paste0("data %>% group_by(", label, ") %>% mutate(x = median(UMAP1), y = median(UMAP2)) %>% dplyr::select(x, y, ", label, ")"))
+        )
+        
+        text_loc = text_loc %>% unique() %>% as.data.frame()
+        
+        print(text_loc)
+    }
+    
+    p <- p + geom_point_rast(size = pt.size, alpha = alpha)
+    
+    if (!is.null(label)) {
+        p <- p + eval(parse(text=paste0("geom_text_repel(data = text_loc,  aes(x=x, y=y, label = ", label, "), color = \"black\", size = text_size, alpha = 1)")))
+    }
+    
+    p <- p + 
+        theme_bw() +
+        labs(
+            title = title
+        ) +
+        theme(
+            plot.title = element_text(hjust = 0.5, face="bold", size = title_size),
+            legend.position = legend.position,
+            axis.text = element_text(size = axis_size),
+            axis.title = element_text(size = axis_title_size),
+            panel.grid = element_blank()
+        )
+    
+    if (!is.null(colors)) {
+        p <- p + scale_color_manual(values = colors)
+    }
+    p
+}
+
+```
+
+
+```{r}
+meta = readRDS("meta.rds")
+```
+
+
+## Ratio of Malignant
+```{r malignat}
+meta$isM = ifelse(meta$Malignant != "Non", "Malignant", "Non")
+
+temp = meta[meta$source == "WCH" & meta$subtype != "Tumor", ] %>%
+    group_by(patient_id, subtype, assign.cell, isM) %>%
+    add_tally() %>%
+    dplyr::select(patient_id, subtype, assign.cell, isM, n) %>%
+    unique() %>%
+    as.data.frame()
+
+
+temp = dcast(
+    temp, patient_id+subtype+assign.cell~isM, 
+    value.var = "n", fill = 0, fun.aggregate = mean
+)
+
+temp$p = temp$Malignant / (temp$Non + 1)
+
+temp_o = temp %>%
+    group_by(assign.cell) %>%
+    mutate(p = mean(p)) %>%
+    dplyr::select(assign.cell, p) %>%
+    unique() %>%
+    as.data.frame()
+
+
+temp_o = temp_o[order(temp_o$p, decreasing = T), ]
+temp$assign.cell = factor(temp$assign.cell, levels = as.character(temp_o$assign.cell))
+```
+
+```{r fig.height=4, fig.width=8}
+temp$subtype = factor(temp$subtype, levels = c("Normal", "Adjacent", "Primary", "Metastasis"))
+p <- ggplot(temp, aes(x=assign.cell, y=log10(p + 1), fill=subtype)) +
+    geom_boxplot() +
+    theme_bw() +
+    theme(
+        panel.grid = element_blank(),
+        axis.text = element_text(size = 15),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5),
+        axis.title = element_text(size = 15),
+        legend.text = element_text(size = 12),
+        legend.position = c(0.9, 0.8),
+        legend.background = element_blank()
+    ) +
+    labs(x="", y="log10(Malignant/Non)", fill="") +
+    scale_fill_manual(values = c(
+        "Normal"="#3BAAD2", "Adjacent"="#4EAE4A", 
+        "Primary"="#E79129", "Metastasis"="#C82A2D"
+    ))
+
+p
+
+ggsave(
+    filename = "plots/Fig2/Ratio_malignant.pdf",
+    plot = p, width = 8, height = 4
+)
+```
+
+
+## UMAP of CNV (Ductal 2)
+
+```{r fig.height=4, fig.width=4}
+dir.create("plots/CNV/umap", showWarnings = F, recursive = T)
+registerDoMC(10)
+foreach (i = unique(meta$assign.cell), .errorhandling = "pass") %dopar% {
+
+    obj <- readRDS(paste0("each_cells/", str_replace_all(i, " ", "_"), "/infercnv_seurat.rds"))
+
+    umap = as.data.frame(obj@reductions$umap@cell.embeddings)
+    colnames(umap) <- c("UMAP1", "UMAP2")
+    umap$clt = meta[rownames(umap), "Malignant"]
+    
+    p <- make_cell_types_plot3(
+        umap, group_by = "clt", label = "clt", title = i
+    ) +
+        ggsci::scale_color_locuszoom()
+    
+    ggsave(
+        filename = paste0("plots/CNV/umap/", str_replace_all(i, " ", "_"), ".pdf"),
+        plot = p, width = 4, height = 4
+    )
+}
+```
+
+### UMAP of ductal 2, colored by subtype
+
+```{r fig.height=4, fig.width=5}
+dir.create("plots/CNV/umap/subtype", showWarnings = F, recursive = T)
+registerDoMC(10)
+foreach (i = unique(meta$assign.cell), .errorhandling = "pass") %dopar% {
+
+    obj <- readRDS(paste0("each_cells/", str_replace_all(i, " ", "_"), "/infercnv_seurat.rds"))
+
+    umap = as.data.frame(obj@reductions$umap@cell.embeddings)
+    colnames(umap) <- c("UMAP1", "UMAP2")
+    umap$subtype = meta[rownames(umap), "subtype"]
+    
+    p <- make_cell_types_plot3(
+        umap, group_by = "subtype", label = NULL, title = i,
+        colors = c(
+          "Normal"="#3BAAD2", "Adjacent"="#4EAE4A", "Tumor"="grey",
+          "Primary"="#E79129", "Metastasis"="#C82A2D"
+      ),
+      legend.position = "right"
+    ) + theme(
+      aspect.ratio = 1,
+      legend.text = element_text(size = 12)
+    ) +
+      guides(color = guide_legend(override.aes = list(size = 5, aplha = 1))) +
+      labs(color = "")
+    
+    ggsave(
+        filename = paste0("plots/CNV/umap/subtype/", str_replace_all(i, " ", "_"), ".pdf"),
+        plot = p, width = 6, height = 4
+    )
+}
+```
+
+
+## Heatmap
+
+
+```{r}
+make_heatmap_by_cells <- function(
+  obj, 
+  cells, 
+  col_order, 
+  cluster_rows = F,
+  cluster_columns = F,
+  row_split = NULL,
+  row_order = NULL,
+  return_mtx = F,
+  mark = NULL
+) {
+    col_orders = data.frame(
+      chrom = gene_pos[rownames(obj@assays$RNA@data), "V2"],
+      start = gene_pos[rownames(obj@assays$RNA@data), "V3"],
+      order = 1:nrow(obj@assays$RNA@data),
+      gene = gene_pos[rownames(obj@assays$RNA@data), "V1"]
+    )
+    
+    
+    col_orders <- col_orders[order(col_orders$chrom, col_orders$start), ]
+
+  
+    temp_meta <- meta[cells, ]
+
+     la <- rowAnnotation(
+        Subtype = temp_meta[cells, "subtype"],
+        col = list(
+            Subtype=c(
+                "Normal"="#3BAAD2", "Adjacent"="#4EAE4A", "Tumor"="grey",
+                "Primary"="#E79129", "Metastasis"="#C82A2D"
+            )
+        )
+    )
+    
+    if (!is.null(row_order)) {
+        row_order = row_order[intersect(rownames(row_order), rownames(temp_meta)), ]
+        temp_mtx = t(as.matrix(obj@assays$RNA@data[col_orders$order, rownames(temp_meta)]))
+        
+        row_split = row_order[cells, "Clt"]
+        # cluster_rows = F
+    } else {
+        temp_mtx = t(as.matrix(obj@assays$RNA@data[col_orders$order, rownames(temp_meta)]))
+    }
+    
+    temp_mtx = apply(temp_mtx, 2, function(y) { (y - mean(y)) / sd(y) ^ as.logical(sd(y)) } )
+    
+    if (return_mtx) {
+        return(temp_mtx)
+    }
+    
+    ba <- NULL
+    if(!is.null(mark)) {
+        ba <- HeatmapAnnotation(
+            foo = anno_mark(
+              at = col_orders$order[col_orders$gene %in% mark], 
+              labels = col_orders$gene[col_orders$gene %in% mark],
+              which = "column", side = "column"
+              # labels_gp = gpar(fontfamily = "Arial Unicode MS")
+            )
+        )
+    }
+    
+    Heatmap(
+        temp_mtx,
+        name = "Infercnv",
+        col = colorRamp2(
+            c(-1.15, -0.5 , 0, 0.5, 1.15), 
+            c("#000074", "white", "white", "white", "#760002")
+        ),
+        show_row_names = F,
+        left_annotation = la,
+        row_title_rot = 0,
+        border = T,
+        show_column_names = F,
+        bottom_annotation = ba,
+        column_names_rot = 90,
+        # bottom_annotation = ba,
+        cluster_columns = cluster_columns,
+        cluster_rows = cluster_rows,
+        column_split = col_orders$chrom,
+        column_title_rot = 90,
+        row_split = row_split,
+        cluster_row_slices = F,
+        cluster_column_slices = F,
+        use_raster =  T, raster_device = "CairoPNG", raster_quality = 3
+    )
+}
+
+```
+
+
+
+```{R}
+obj <- readRDS("each_cells/Ductal_2/infercnv_seurat.rds")
+
+
+temp = meta[meta$assign.cell == "Ductal 2", c("cells", "Malignant")]
+colnames(temp) = c("Cell", "Clt")
+
+temp$Cell = as.character(temp$Cell)
+temp$Clt = as.character(temp$Clt)
+
+set.seed(42)
+temp = temp %>%
+  group_by(Clt) %>%
+  sample_n(100, replace = T) %>%
+  unique() %>%
+  as.data.frame()
+
+row.names(temp) <- temp$Cell
+
+
+# temp_mtx = sort(
+#   Matrix::rowSums(obj@assays$RNA@counts[, temp$Cell[temp$Clt == 4]]), 
+#   decreasing = T
+# )
+
+gene_pos = read.table("meta/gene_pos.txt", stringsAsFactors = F)
+rownames(gene_pos) <- gene_pos$V1
+  
+h = make_heatmap_by_cells(
+  obj, 
+  temp$Cell, # row.names(obj@meta.data),   # [obj@meta.data$res.0.1 == 1, ]
+  col_order,
+  row_order = temp[, c("Clt", "Cell")],
+  cluster_rows = F, 
+  mark = c(
+      "TP53", "KRAS", "ADD2", "ROR2", 
+      "SCARAS5", "SLC35F3", "USP41", "FOXP2",
+      "PRDX1", "PRDX6", "NOTCH1", "HES1", "EGFR"
+     )
+)
+
+pdf(paste0("plots/CNV/heatmap/Ductal_2.pdf"), width = 10, height = 6)
+draw(h)
+dev.off()
+```
+
+
+## MAF
+
+[TCGA Maf](gdc.cancer.gov/about-data/publications/PanCan-CellOfOrigin)
+[WCH maf](/mnt/data7/zhouran/Pancreatic/data/mutect2/vep/merged.maf)
+
+
+```{r}
+tcga_maf <- GDCquery_Maf("PAAD", pipelines = "muse") %>% read.maf
+saveRDS(tcga_maf, "bulk/PAAD_maf.rds")
+
+tmd <- read.table('bulk/mutation-load_updated.txt', 
+                  sep = '\t',
+                  header = T)
+
+subtmd <- tmd[, c('Cohort', 'Non.silent.per.Mb')]
+
+subtmd <- subtmd[subtmd$Cohort %in% c("PAAD"),]
+
+
+maf <- maftools::read.maf("WES/merged.maf")
+# tcga_maf <- maftools::read.maf("bulk/mc3.v0.2.8.PUBLIC.maf.gz")
+# saveRDS(tcga_maf, "bulk/mc3.v0.2.8.PUBLIC.maf.rds")
+
+maf.mutload = maf@variant.classification.summary
+
+
+stage <- c("_P", "_C", "_T")
+
+kras = maf@data
+kras = kras[kras$Hugo_Symbol == "KRAS", ]
+kras = c(as.character(kras$Tumor_Sample_Barcode), kras$Matched_Norm_Sample_Barcode)
+
+# pdf('tmd.addModel.pdf')
+res <- lapply(stage, function(x) {
+  tmp <-
+    as.data.frame(maf.mutload[grep(maf.mutload$Tumor_Sample_Barcode, pattern = x), ])
+  
+  barcodes = c(
+    "_P"="Adjacent",
+    "_C"="Primary",
+    "_T"="Metastasis"
+  )
+  
+  y = barcodes[[x]]
+  
+  y = paste(y, ifelse(tmp$Tumor_Sample_Barcode %in% kras, "KRAS", ""))
+  
+  tmp$Tumor_Sample_Barcode <- y
+  colnames(tmp) <- colnames(subtmd)
+  tmp$Non.silent.per.Mb <- tmp$Non.silent.per.Mb / 50
+  tmp <-
+    rbind(subtmd, tmp[, colnames(subtmd)])
+  
+  tmp %>% group_by(Cohort) %>% summarize(n = median(Non.silent.per.Mb)) -> mediandf
+  tmp$Cohort <-
+    factor(tmp$Cohort, levels = as.character(mediandf$Cohort[order(mediandf$n, decreasing = T)]))
+  # labelColor <-
+  #   ifelse(levels(tmp$Cohort) %in% c('LGG', 'GBM', glue::glue("TNP-{x}")),
+  #          "red",
+  #          "black")
+  # 
+  # ggplot(tmp, aes(x = Cohort,
+  #                 y = Non.silent.per.Mb)) +
+  #   geom_boxplot() +
+  #   scale_y_log10(labels = scales::comma) +
+  #   theme_bw() + theme(axis.text.x = element_text(
+  #     angle = 90,
+  #     hjust = 1,
+  #     colour = labelColor
+  #   ))
+  return(tmp)
+})
+
+
+res <- do.call(rbind, res)
+res %>% group_by(Cohort) %>% summarize(n = median(Non.silent.per.Mb)) -> mediandf
+res$Cohort <-
+  factor(res$Cohort, levels = as.character(mediandf$Cohort[order(mediandf$n, decreasing = F)]))
+
+labelColor <-
+    ifelse(startsWith(levels(res$Cohort),prefix = "TNP"),
+           "red",
+           "black")
+
+# pdf('tmd.final.v4.pdf', 4, 4)
+ggplot(res, aes(x = Cohort,
+                y = Non.silent.per.Mb + .1)) +
+  geom_boxplot() +
+  scale_y_log10(labels = scales::comma) +
+  theme_bw() + theme(axis.text.x = element_text(
+    angle = 90,
+    hjust = 1,
+    colour = labelColor
+  )) + ylab("Number of Non-silent Mutation per Mb")
+# dev.off()
+```
+
+
+
+### ATAC
+```{r}
+query <- GDCquery(
+    project = c("TCGA-PAAD"),
+    data.category = "Copy Number Variation",
+    legacy = F,
+    file.type = "nocnv_grch38.seg.v2.txt",
+    sample.type = c("Primary Tumor"),
+)
+GDCdownload(query)
+cnv = GDCprepare(query)
+cnv$subtype = "Primary"
+
+
+query <- GDCquery(
+    project = c("TCGA-PAAD"),
+    data.category = "Copy Number Variation",
+    legacy = F,
+    file.type = "nocnv_grch38.seg.v2.txt",
+    sample.type = c("Metastatic"),
+)
+GDCdownload(query)
+temp = GDCprepare(query)
+temp$subtype = "Metastatis"
+cnv = rbind(cnv, temp)
+
+
+query <- GDCquery(
+    project = c("TCGA-PAAD"),
+    data.category = "Copy Number Variation",
+    legacy = F,
+    file.type = "nocnv_grch38.seg.v2.txt",
+    sample.type = c("Solid Tissue Normal"),
+)
+GDCdownload(query)
+temp = GDCprepare(query)
+temp$subtype = "Normal"
+
+cnv = rbind(cnv, temp)
+
+saveRDS(cnv, "bulk/TCGA_CNV_hg38.rds")
+
+# Get gene information from GENCODE using biomart
+genes <- TCGAbiolinks:::get.GRCh.bioMart(genome = "hg38") 
+saveRDS(genes, "bulk/hg38_genes.rds")
+```
+
+
+
+```{r}
+cnv <- readRDS("bulk/TCGA_CNV_hg38.rds")
+genes <- readRDS("bulk/hg38_genes.rds")
+markersMatrix <-  readr::read_tsv("bulk/snp6.na35.liftoverhg38.txt", col_names = T, col_types = "ccn", progress = FALSE)
+
+commonCNV <- readr::read_tsv("bulk/CNV.hg38.bypos.111213.bed", progress = FALSE)
+commonCNV$Chromosome <- sapply(commonCNV$Chromosome, function(x) {
+    x = str_replace_all(x, "^chr", "")
+    if (x == "X") {
+        return(23)
+    } else if (x == "Y") {
+        return(24)
+    } else {
+        return(as.numeric(x))
+    }
+})
+
+
+cnv[cnv[,"Segment_Mean"] < -0.3,"Label"] <- 0
+cnv[cnv[,"Segment_Mean"] > 0.3,"Label"] <- 1
+cnv <- cnv[!is.na(cnv$Label),]
+
+
+# Remove "Segment_Mean" and change col.names
+cnvMatrix <- as.data.frame(cnv)[,-6]
+colnames(cnvMatrix) <- c("Sample.Name", "Chromosome", "Start", "End", "Num.of.Markers", "Sample", "subtype", "Aberration")
+cnvMatrix <- cnvMatrix[, c(
+  "Sample.Name", "Chromosome", "Start", "End", 
+  "Num.of.Markers", "Aberration", "Sample", "subtype"
+)]
+
+# Substitute Chromosomes "X" and "Y" with "23" and "24"
+cnvMatrix[cnvMatrix$Chromosome == "X","Chromosome"] <- "23"
+cnvMatrix[cnvMatrix$Chromosome == "Y","Chromosome"] <- "24"
+cnvMatrix$Chromosome <- as.integer(cnvMatrix$Chromosome)
+
+
+colnames(markersMatrix) <- c("Probe.Name", "Chromosome", "Start")
+markersMatrix[markersMatrix$Chromosome == "X","Chromosome"] <- "23"
+markersMatrix[markersMatrix$Chromosome == "Y","Chromosome"] <- "24"
+markersMatrix$Chromosome <- as.integer(markersMatrix$Chromosome)
+markerID <- paste(markersMatrix$Chromosome,markersMatrix$Start, sep = ":")
+
+# Removed duplicates
+markersMatrix <- markersMatrix[!duplicated(markerID),]
+# Filter markersMatrix for common CNV
+markerID <- paste(markersMatrix$Chromosome,markersMatrix$Start, sep = ":")
+
+
+
+commonID <- paste(commonCNV$Chromosome,commonCNV$Start, sep = ":")
+markersMatrix_fil <- markersMatrix[!markerID %in% commonID,]
+
+cnvMatrix$ID <- sapply(cnvMatrix$Sample, function(x) {
+    x = str_split(x, "-")[[1]][1:3]
+    paste(x, collapse = "-")
+})
+
+
+set.seed(42)
+```
+
+
+```{R}
+is.integer0 <- function(x) {
+    is.integer(x) && length(x) == 0L
+}
+
+
+load_cnv <- function(segmentation_matrix, markers_list, num_of_samples){
+    
+    message("Loading Copy Number Data");
+    
+    # Detect the chromosomes
+    chromosomes <- as.numeric(sort(unique(names(markers_list))));
+    chromosomes <- chromosomes[which(!is.na(chromosomes))];
+    
+    # Detect the aberration kinds
+    aberration_kinds <- 1:length(unique(segmentation_matrix[,6]));
+    names(aberration_kinds) <- sort(unique(segmentation_matrix[,6]));
+    
+    # Detect the samples
+    samples <- 1:num_of_samples;
+    if(!is.numeric(segmentation_matrix[,1])){
+        sample_names <- unique(segmentation_matrix[,1]);
+        for(i in 1:length(sample_names)){
+            segmentation_matrix[which(segmentation_matrix[,1]==sample_names[i]),1] <- i;
+        }
+    }
+    
+    region_list <- list();
+    # Create the final structure list of the returned list
+    pb <- progress_bar$new(total = length(aberration_kinds))
+    for(k in 1:length(aberration_kinds)){
+        pb$tick()
+        region_list[[ aberration_kinds[k] ]] <- list();
+        
+        for(i in 1:length(chromosomes) ){
+            region_list[[ aberration_kinds[k] ]][[ chromosomes[i] ]] <- matrix(0, length(samples), ncol(markers_list[[ chromosomes[i] ]]));
+            rownames(region_list[[ aberration_kinds[k] ]][[ chromosomes[i] ]]) <- samples;
+            colnames(region_list[[ aberration_kinds[k] ]][[ chromosomes[i] ]]) <- c(1:ncol(markers_list[[ chromosomes[i] ]]));
+        }
+    }
+    
+    pb <- progress_bar$new(total = length(aberration_kinds))
+    for(k in 1:length(aberration_kinds)){
+        pb$tick()
+        
+        ab_ids <- which(segmentation_matrix[,6]==names(aberration_kinds[k]));
+        
+        # In this matrix all regions aberrant as aberration_kinds[k] are stored
+        tmp_matrix1 <- segmentation_matrix[ab_ids,];
+        if(class(tmp_matrix1)=="numeric"){
+            tmp_matrix1 <- t(as.matrix(tmp_matrix1));
+        }
+        for(i in 1:length(chromosomes) ){
+            
+            # In this matrix all regions aberrant as aberration_kinds[k] for the i-th chromsome are stored
+            tmp_matrix2 <- tmp_matrix1[which(tmp_matrix1[,2]==chromosomes[i]),];
+            if(class(tmp_matrix2)=="numeric"){
+                tmp_matrix2 <- t(as.matrix(tmp_matrix2));
+            }
+            # message(".", appendLF = FALSE);
+            for(j in 1:length(samples)){
+                #In this matrix all regions aberrant as aberration_kinds[k] for the i-th chromsome and for the j-th sample are stored
+                tmp_matrix3 <- tmp_matrix2[which(tmp_matrix2[,1]==samples[j]),];
+                if(class(tmp_matrix3)=="numeric"){
+                    tmp_matrix3 <- t(as.matrix(tmp_matrix3));
+                }
+                if(nrow(tmp_matrix3)>0){
+                    for(t in 1:nrow(tmp_matrix3)){
+                        start_prob <- tmp_matrix3[t,3];
+                        end_prob <- tmp_matrix3[t,4];
+                        
+                        start_index <- which(markers_list[[ chromosomes[i] ]][1,] == start_prob);
+                        end_index <- which(markers_list[[ chromosomes[i] ]][2,] == end_prob);
+                        
+                        if (is.integer0(start_index) || is.integer0(end_index)) {
+                            next
+                        }
+                        
+                        if (end_index - start_index <= 0) {
+                          next
+                        }
+                        
+                        region_list[[ aberration_kinds[k] ]][[ chromosomes[i] ]][samples[j], start_index:end_index] <- 1;
+                    }
+                }
+            }
+        }
+    }	
+    message("\nDone");
+    names(region_list) <- names(aberration_kinds);
+    return(region_list);
+    
+}
+```
+
+
+
+
+```{r}
+markersMatrix_fil = as.data.frame(markersMatrix_fil)
+
+markers_obj <- load_markers(markersMatrix_fil)
+
+cnvMatrix = cnvMatrix[cnvMatrix$End - cnvMatrix$Start > 0, ]
+
+dir.create("rds/GAIA/cnv_obj", showWarnings = F, recursive = T)
+for (i in unique(cnvMatrix$subtype)) {
+
+    temp <- load_cnv(
+      cnvMatrix[cnvMatrix$subtype == i, ], 
+      markers_obj, 
+      length(unique(cnvMatrix$Sample.Name))
+    )
+    
+    saveRDS(temp, paste0("rds/GAIA/cnv_obj/", i, ".rds"))
+    
+    tryCatch({
+      results <- runGAIA(
+          temp,
+          markers_obj,
+          output_file_name = paste0("rds/GAIA/GAIA_", i, ".txt"),
+          aberrations = -1,  # -1 to all aberrations
+          chromosomes = -1, # -1 to all chromosomes
+          approximation = TRUE, # Set to TRUE to speed up the time requirements
+          num_iterations = 5000, # Reduced to speed up the time requirements
+          threshold = 0.25
+      )
+      saveRDS(results, paste0("rds/GAIA/", i, ".rds"))
+    }, error = function(e) {})
+    
+    gc()
+}
+```
+
+```{r}
+# Set q-value threshold
+# Use a smalled value for your analysis. We set this as high values
+# due to the small number of samples which did not reproduced
+# results with smaller q-values
+threshold <- 0.3
+
+RecCNV = NULL
+for (i in list.files("rds/GAIA/", pattern = "rds", recursive = F, full.names = T)) {
+    print(i)
+    x = readRDS(i)
+    temp <- as.data.frame(t(apply(x,1,as.numeric)))
+    colnames(temp) <- colnames(x)
+    temp <- cbind(temp, score = 0)
+    temp$ident <- str_replace_all(basename(i), ".rds", "")
+    RecCNV = rbind(RecCNV, temp)
+}
+```
+
+
+```{r}
+ref = rtracklayer::readGFFAsGRanges("genome/Homo_sapiens/Homo_sapiens.GRCh38.93.gtf")
+genes_GR = ref[ref$type == "gene"]
+
+
+colnames(RecCNV)[1:5] <- c("Chr","Aberration","Start","End","Size")
+tempCNV = RecCNV[RecCNV$End > RecCNV$Start, ]
+sCNV_GR <- makeGRangesFromDataFrame(tempCNV,keep.extra.columns = TRUE)
+
+hits <- findOverlaps(genes_GR, sCNV_GR, type = "within")
+sCNV_ann <- cbind(tempCNV[subjectHits(hits),],genes_GR[queryHits(hits),])
+
+AberrantRegion <- paste0(as.character(sCNV_ann$Chr),":", as.character(sCNV_ann$Start),"-", as.character(sCNV_ann$End))
+GeneRegion <- paste0(as.character(sCNV_ann$Chr),":",as.character(sCNV_ann$start),"-",as.character(sCNV_ann$end))
+AmpDel_genes <- cbind(
+  sCNV_ann[,c("q-value", "Aberration", "ident", "gene_name")],
+  AberrantRegion,GeneRegion
+)
+
+saveRDS(AmpDel_genes, "bulk/AmpDel.rds")
+```
+
+
+```{r}
+AmpDel_genes <- readRDS("bulk/AmpDel.rds")
+format_data_to_mut <- function(x) {
+
+    x$Chromosome <- paste0(
+      "chr",
+      sapply(as.character(x$GeneRegion), function(x) {
+        x = str_split(x, "[:-]")[[1]][1]
+        
+        if (x == 23) {
+          return("X")
+        } else if (x == 24) {
+          return("Y")
+        } else {
+          return(x)
+        }
+      })
+    )
+    
+    x$Start_Position <- as.numeric(sapply(as.character(x$GeneRegion), function(x) {
+        str_split(x, "[:-]")[[1]][2]
+      }))
+    x$End_Position <- as.numeric(sapply(as.character(x$GeneRegion), function(x) {
+        str_split(x, "[:-]")[[1]][3]
+      }))
+    
+    x$Variant_Classification <- "Transcription Factor"
+    x$TF = x$gene_name
+    x$Type <- 1
+    x = x[, c("Chromosome", "Start_Position", "End_Position", "Type", "Variant_Classification", "TF")]
+    unique(x)
+}
+
+format_data_for_circlize <- function(data, threshold=0.3) {
+    s.cnv = data.frame(
+        Chromosome=as.character(sapply(data$AberrantRegion, function(x) { 
+          x = str_split(x, ":")[[1]][1]
+            
+          if (x == 23) {
+            x = "X"
+          } else if (x == 24) {
+            x = "Y"
+          }
+          paste0("chr", x) 
+        })),
+        Start_position=as.numeric(as.character(sapply(data$AberrantRegion, function(x) { 
+            as.numeric(str_split(x, "[:-]")[[1]][2]) 
+        }))),
+        End_position=as.numeric(as.character(
+            sapply(data$AberrantRegion, function(x) { 
+            as.numeric(str_split(x, "[:-]")[[1]][3]) 
+        }))),
+        Aberration_Kind=data$ident,
+        CNV=rep(1, nrow(data)),
+        qval=data$`q-value`,
+        TF=data$gene_name
+    )
+    
+    s.cnv
+}
+
+
+make_circos_plot <- function(s.cnv, s.mut, cex=0.4, no.legend = FALSE) {
+    circos.clear()
+    rownames(s.mut) <- s.mut$TF
+    
+    # calculate -log10(qvalue)
+    s.cnv$qval = -1 * log10(s.cnv$qval)
+    s.cnv$qval[is.infinite(s.cnv$qval)] = max(s.cnv$qval[is.finite(s.cnv$qval)])
+ 
+    p05 = -1 * log10(0.05) / max(s.cnv$qval)
+    p01 = -1 * log10(0.01) / max(s.cnv$qval)
+    
+    s.cnv$qval <- s.cnv$qval / max(s.cnv$qval)
+    
+    s.cnv$qval = s.cnv$qval / max(s.cnv$qval)
+
+    chroms = unique(s.mut$Chromosome)
+    
+    if(length(chroms) == 0) {
+        return()
+    }
+
+    par(mar=c(1,1,1,1), cex=1.5)
+    
+    if (length(chroms) == 1) {
+        circos.par(
+            "start.degree" = 90, canvas.xlim = c(0, 1), canvas.ylim = c(0, 1),
+             gap.degree = 270, cell.padding = c(0, 0, 0, 0), track.margin = c(0.005, 0.005)
+        )
+    } else {
+        circos.par(gap.degree = 8)
+    }
+
+    circos.initializeWithIdeogram(
+      chromosome.index = chroms,
+      species = "hg38",
+      plotType = c("ideogram", "labels")
+    )
+    circos.par(cell.padding = c(0, 0, 0, 0))
+    # Add CNV results
+    colors = c(
+        "Normal"="#3BAAD2", "Adjacent"="#4EAE4A", 
+        "Primary"="#E79129", "Metastasis"="#C82A2D"
+    )
+    
+    # plot the CNV region
+    circos.genomicTrackPlotRegion(
+        s.cnv,  ylim = c(0, 1.2),
+         panel.fun = function(region, value, ...) {
+
+            circos.genomicRect(
+                region, value, ytop.column = 2, ybottom = 0,
+                col = colors[as.character(value[[1]])], border="white"
+            )
+           
+            cell.xlim = get.cell.meta.data("cell.xlim")
+            circos.lines(cell.xlim, c(0, 0), lty = 2, col = "#00000040")
+
+            if (value[[3]] > 0 && value[[4]] %in% rownames(s.mut)) {
+                circos.points(
+                    s.mut[value[[4]], "Start_Position"], 
+                    value[[3]], col = "blue", pch=18, cex=cex
+                )
+            }
+         }
+    )
+    
+    for (c in chroms) {
+        circos.yaxis(
+            at=c(p05, p01), 
+            labels.cex=1,
+            labels = c('*', '**'),
+            labels.niceFacing = F,
+            sector.index=c
+        )
+    }
+
+    circos.genomicTrackPlotRegion(
+        s.mut, ylim = c(0.3, 2.2), track.height = 0.05,
+        panel.fun = function(region, value, ...) {
+            circos.genomicPoints(region, value, cex = cex, pch = 16, col = "blue", ...)
+    })
+    
+    
+    circos.genomicTrackPlotRegion(s.mut, ylim = c(0, 1), track.height = 0.1, bg.border = NA)
+    i_track = get.cell.meta.data("track.index")
+    
+    circos.genomicTrackPlotRegion(
+        s.mut, ylim = c(0, 1),
+        panel.fun = function(region, value, ...) {
+            circos.genomicText(
+                region, value, y = 1, labels.column = 3,
+                col = "blue", facing = "clockwise",
+                adj = c(0.9, 0.5),
+                posTransform = posTransform.text,
+                cex = cex, niceFacing = TRUE
+            )
+       },
+       track.height = 0.1, bg.border = NA
+    )
+    
+    circos.genomicPosTransformLines(
+        s.mut,
+        posTransform = function(region, value) {
+            posTransform.text(
+                region, y = 0.3, labels = value[[3]],
+                cex = cex, track.index = i_track + 1
+            )
+        },
+        direction = "inside", track.index = i_track
+    )
+    
+    circos.clear()
+    
+    if (length(chroms) == 1) {
+        x1 = 0
+        y1 = 0.25
+        x2 = 0
+        y2 = 0.1
+    } else {
+        x1 = -0.15
+        y1 = 0.15
+        x2 = -0.2
+        y2 = -0.05
+    }
+    
+    if (!no.legend) {
+        legend(
+            x1, y1, bty="n", y.intersp=1, names(colors), pch=15, 
+            col=colors, title="CNVs", 
+            text.font=1, cex=cex, title.adj=0
+        )
+    }
+}
+```
+
+
+```{r fig.height=8, fig.width=8}
+# AmpDel_genes$external_gene_name %in% c("TP53", "PRDX1", "PRDX6", "NOTCH1", "EFGR", "KRAS")
+
+s.mut = format_data_to_mut(
+  AmpDel_genes[AmpDel_genes$Aberration == 1 & AmpDel_genes$gene_name %in% c("TP53", "PDX1", "PAX6", "NOTCH1", "EFGR", "KRAS", "CDKN2A"), ]
+)
+
+rownames(s.mut) <- s.mut$TF
+
+s.cnv = format_data_for_circlize(
+  AmpDel_genes[AmpDel_genes$Aberration == 1 & AmpDel_genes$gene_name %in% c("TP53", "PDX1", "PAX6", "NOTCH1", "EFGR", "KRAS", "CDKN2A"), ]
+)
+
+for (i in unique(s.cnv$Chromosome)) {
+  s.cnv[s.cnv$Chromosome == i, "CNV"] = s.cnv[s.cnv$Chromosome == i, "CNV"] - (1:sum(s.cnv$Chromosome == i) - 1) / 10
+}
+
+
+make_circos_plot(s.cnv, s.mut, cex = 0.8)
+```
+
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

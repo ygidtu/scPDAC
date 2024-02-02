@@ -1,0 +1,811 @@
+---
+title: "Fig4"
+author: "Yiming Zhang"
+date: "2020/5/18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r include=FALSE}
+library(ComplexHeatmap)
+library(circlize)
+library(ggplot2)
+library(FactoMineR)
+library(dplyr)
+library(reshape2)
+library(factoextra)
+library(stringr)
+library(tsidx)
+library(TCGAbiolinks)
+library(SingleCellExperiment)
+library(MuSiC)
+library(xbioc) # pVar for MuSiC
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(GEOquery)
+library(openxlsx)
+library(wesanderson)
+library(ggpubr)
+
+extrafont::loadfonts()
+```
+
+## Cell weight
+
+```{r readmeta}
+meta = readRDS("meta.rds")
+meta$disease = as.character(meta$disease)
+meta$disease[meta$disease == "ADS"] = "ASC"
+```
+
+
+
+```{r clt, fig.height=6, fig.width=8}
+gg_color_hue <- function(n) {
+  hues = seq(15, 375, length = n + 1)
+  hcl(h = hues, l = 65, c = 100)[1:n]
+}
+
+
+patient_cols = gg_color_hue(length(unique(meta$patient_id)))
+names(patient_cols) = sort(unique(meta$patient_id))
+
+
+la = rowAnnotation(
+    Disease = as.character(sapply(rownames(temp1), function(x) {
+        str_split(x, " ")[[1]][3]
+    })),
+    Subtype = as.character(sapply(rownames(temp1), function(x) {
+        str_split(x, " ")[[1]][2]
+    })),
+    # Patient = as.character(sapply(rownames(temp1), function(x) {
+    #     str_split(x, " ")[[1]][1]
+    # })),
+    col = list(
+        Subtype = c(
+            "Normal"="#3BAAD2", "Adjacent"="#4EAE4A",
+            "Primary"="#E79129", "Metastasis"="#C82A2D",
+            "Tumor"="red"
+        ),
+        Disease = c("PDAC"="#0084D1", "ASC"="#A0C807")
+        # Patient = patient_cols
+    )
+)
+
+h = Heatmap(
+    temp1, 
+    name = "Weight",
+    border = T, use_raster = T,
+    left_annotation = la, 
+    show_row_names = F,
+    row_split = 5
+)
+draw(h)
+```
+
+
+#### corrlation
+```{r cor}
+la = rowAnnotation(
+    Disease = as.character(sapply(rownames(temp2), function(x) {
+        str_split(x, " ")[[1]][3]
+    })),
+    Subtype = as.character(sapply(rownames(temp2), function(x) {
+        str_split(x, " ")[[1]][2]
+    })),
+    # Patient = as.character(sapply(rownames(temp1), function(x) {
+    #     str_split(x, " ")[[1]][1]
+    # })),
+    col = list(
+        Subtype = c(
+             "Normal"="#3BAAD2", "Adjacent"="#4EAE4A",
+            "Primary"="#E79129", "Metastasis"="#C82A2D",
+            "Tumor"="red"
+        ),
+        Disease = c("PDAC"="#0084D1", "ASC"="#A0C807")
+        # Patient = patient_cols
+    )
+)
+
+cairo_pdf("plots/Fig4/cor.pdf", width = 5, height = 4)
+h = Heatmap(
+    temp2, 
+    name = "Weight",
+    border = T, use_raster = T,
+    left_annotation = la, 
+    show_row_names = F, show_column_names = F,
+    row_split = 4, column_split = 4
+)
+draw(h)
+dev.off()
+draw(h)
+```
+
+
+
+### PCA contribution
+```{r pca}
+# 此处的sizefactor没有实际意义，细胞数量是按照每个样本的占比来反应的
+temp <- meta %>%
+    group_by(patient_id, subtype, disease) %>%
+    add_tally() %>%
+    mutate(sizeFactor = n) %>%
+    dplyr::select(patient_id, subtype, disease, assign.cell, sizeFactor) %>%
+    group_by(assign.cell, patient_id, subtype, disease) %>%
+    add_tally() %>%
+    mutate(scale.n = n / sizeFactor) %>%
+    # dplyr::select(patient_id, subtype, disease, assign.cell, sizeFactor, n, scale.n) %>%
+    unique() %>%
+    as.data.frame()
+    
+temp$clt = paste(temp$patient_id, temp$subtype, temp$disease)
+temp1 = dcast(temp, clt~assign.cell, value.var = "scale.n", fun.aggregate = mean, fill = 0)
+
+rownames(temp1) <- temp1$clt
+temp1 = temp1[, colnames(temp1) != "clt"]
+
+temp2 = cor(t(temp1))
+```
+
+
+```{R pcastats}
+subtypes = as.character(unique(meta$subtype))
+subtypes = subtypes[subtypes != "Normal"]
+
+contrib = NULL
+for (i in subtypes) {
+    res.pca = prcomp(temp1)
+    res.contrib = get_pca_var(res.pca)
+    res.contrib = as.data.frame(res.contrib$contrib)
+    res.contrib$subtype = paste(i, "Normal", sep = " vs ")
+    res.contrib$cell = rownames(res.contrib)
+    contrib = rbind(contrib, res.contrib)
+}
+```
+
+
+```{r pcaplot, fig.height=4, fig.width=6}
+contrib$cell = factor(
+    as.character(contrib$cell),
+    levels = c(
+        "Ductal 1", "Ductal 2", "Acinar", "Endocrine", "Endothelial",
+        "Fibroblast", "Stellate", "Macrophage", "T", "B"
+    )
+)
+
+
+contrib$subtype = factor(
+  as.character(contrib$subtype),
+  levels = c(
+    "Adjacent vs Normal", "Primary vs Normal",
+    "Metastasis vs Normal", "Tumor vs Normal"
+  )
+)
+
+
+p <- ggplot(contrib[contrib$subtype != "Tumor vs Normal", ], aes(x=cell, y=Dim.1, fill=subtype)) +
+    geom_bar(stat = "identity", position = position_dodge()) +
+  theme_bw(base_family = "Arial Unicode MS") +
+  theme(
+        panel.grid = element_blank(),
+        axis.text = element_text(size = 12),
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+        legend.position = "bottom",
+        legend.text = element_text(size = 12)
+    ) +
+    labs(x="", y="", fill="") +
+    scale_fill_manual(values = c(
+        "Normal"="#3BAAD2", "Adjacent vs Normal"="#4EAE4A",
+        "Primary vs Normal"="#E79129", "Metastasis vs Normal"="#C82A2D"
+    ))
+
+p
+
+ggsave(
+  filename = "plots/Fig4/contrib.pdf",
+  width = 6, height = 4, plot = p, device = cairo_pdf
+)
+```
+
+
+## Bulk
+
+### Download TCGA data
+
+#### Download data
+```{R tcga, eval=FALSE, include=FALSE}
+## Prepare data
+query <- GDCquery(
+    project = "TCGA-PDAC",
+    legacy = FALSE, 
+    experimental.strategy = "RNA-Seq", 
+    data.category = "Transcriptome Profiling", 
+    data.type = "Gene Expression Quantification", 
+    workflow.type = "HTSeq - Counts"
+)
+
+GDCdownload(query)
+
+paad <- GDCprepare(query)
+
+clinical <- GDCquery_clinic(project = "TCGA-PAAD", type = "clinical")
+
+saveRDS(paad, "bulk/TCGA/PAAD_counts.rds")
+saveRDS(clinical, "bulk/TCGA/PAAD_clinical.rds")
+
+paad <- readRDS("bulk/TCGA/PAAD_counts.rds")
+clinical <- readRDS("bulk/TCGA/PAAD_clinical.rds")
+
+### CNV
+query <- GDCquery(
+    project = c("TCGA-PAAD"),
+    data.category = "Copy Number Variation",
+    legacy = F,
+    file.type = "nocnv_grch38.seg.v2.txt",
+    sample.type = c("Primary solid Tumor"),
+)
+GDCdownload(query)
+paad.no.cnv = GDCprepare(query)
+saveRDS(paad.no.cnv, "TCGA/PAADnocnvhg38.rds")
+
+
+### 
+# Get gene information from GENCODE using biomart
+genes <- TCGAbiolinks:::get.GRCh.bioMart(genome = "hg38") 
+saveRDS(genes, "bulk/TCGA/hg38_genes.rds")
+
+
+### Mut
+ADmut <- GDCquery_Maf(tumor = "PAAD", pipelines = "mutect2")
+saveRDS(ADmut, "bulk/TCGA/LUAD_mut.rds")
+```
+
+
+```{r kmeans, fig.height=6, fig.width=6}
+set.seed(42)
+bulk_dec <- readRDS("deconvolution.rds")
+
+temp = kmeans(bulk_dec$Est.prop.weighted, centers = 4)
+
+h <- Heatmap(
+  bulk_dec$Est.prop.weighted, 
+  name = "Weight",
+  show_row_names = F, 
+  row_split = sapply(rownames(bulk_dec$Est.prop.weighted), function(x) {
+    temp$cluster[[x]]
+  }),
+  border = T, # clustering_method_rows = "average",
+  cluster_rows = F, 
+  use_raster = T
+)
+
+# draw(h)
+
+pdf("tcga_weight.pdf", width = 5, height = 4)
+draw(h)
+dev.off()
+```
+
+#### Deconvolution survival
+```{r surv, fig.height=6, fig.width=4}
+dir.create("Surv", showWarnings = F, recursive = T)
+
+for (i in unique(temp$cluster)) {
+  # samples = rownames(bulk_dec$Est.prop.weighted)[ro[[i]]]
+  
+  clinical$group = "Others"
+  samples = names(temp$cluster[temp$cluster == i])
+
+  clinical[samples, "group"] = i
+  
+  clin <- data.frame(
+      vital_status = clinical$vital_status,
+      days_to_death = clinical$days_to_death / 30,
+      days_to_last_follow_up = clinical$days_to_last_follow_up / 30,
+      group = clinical$group
+  )
+  
+  # clinical$group = factor(clinical$group, levels=c(as.character(i), "Others"))
+  p <- TCGAanalyze_survival(
+      clin,
+      clusterCol = "group",
+      filename = NULL,
+      risk.table = F,
+      conf.int = F,
+      ncensor.plot = F,
+      # labels = c(as.character(i), "Others"),
+      color = c("red", "blue"),
+      conf.int.style = "step",  # customize style of confidence intervals
+  )
+
+  p <- p$plot
+  p <- p +
+      ggplot2::theme_bw() +
+      ggplot2::theme(
+          aspect.ratio = 1,
+          axis.text = element_text(size = 15),
+          axis.title = element_text(size = 15),
+          legend.position = c(0.75, 0.9),
+          legend.title = element_blank(),
+          legend.text = element_text(size = 15),
+          plot.title = element_text(size = 15, hjust = 0.5),
+          panel.grid = element_blank()
+      ) + labs(title = i, x = "Time since diagnosis (months)")
+  
+  print(p)
+  
+  ggsave(
+    filename = paste0("Surv/", i, "_month.pdf"),
+    width = 4, height = 4, plot = p, device = cairo_pdf
+  )
+}
+```
+
+
+
+```{r}
+for (i in unique(temp$cluster)) {
+  # samples = rownames(bulk_dec$Est.prop.weighted)[ro[[i]]]
+
+  samples = c()
+  for (j in names(temp$cluster)) {
+    if (temp$cluster[[j]] == i) {
+      samples = c(samples, j)
+    }
+  }
+  clinical[samples, "group"] = i
+}
+# clinical = clinical[!is.na(clinical), ]
+```
+
+
+```{r fig.height=4, fig.width=6}
+col_fun = colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+
+
+temp_markers <- markers[markers$adj.P.Val < 0.05 & markers$logFC > 1 & markers$group == "ADEX", ]
+ttt = t(scale(t(paad[temp_markers$Symbol, ])))
+temp_markers = temp_markers[which(!is.na(ttt[, 1])), ]
+
+h <- Heatmap(
+  na.omit(ttt),
+  name = "Expr",
+  col = col_fun, 
+  # row_split = temp_markers$group,
+  row_split = 3,
+  column_split = sapply(colnames(paad), function(x) {
+    temp$cluster[[x]]
+  }),
+  show_row_names = F,
+  show_column_names = F,
+  cluster_rows = T, cluster_columns = F,
+  row_title_rot = 0,
+  border = T,
+  clustering_method_rows = "complete"
+)
+
+draw(h)
+
+markers$group_bak = markers$group
+
+markers$group[markers$group == "ADEX"] = "ADEX_2"
+markers$group[markers$group == "ADEX_2" & markers$Symbol %in% temp_markers$Symbol[row_order(h)[[2]]]] = "ADEX_1"
+
+
+temp_markers <- markers[markers$adj.P.Val < 0.05 & markers$logFC > 1, ]
+ttt = t(scale(t(paad[temp_markers$Symbol, ])))
+temp_markers = temp_markers[which(!is.na(ttt[, 1])), ]
+
+h <- Heatmap(
+  na.omit(ttt),
+  name = "Expr",
+  col = col_fun, 
+  row_split = temp_markers$group,
+  # row_split = 3,
+  column_split = sapply(colnames(paad), function(x) {
+    temp$cluster[[x]]
+  }),
+  show_row_names = F,
+  show_column_names = F,
+  cluster_rows = F, cluster_columns = F,
+  row_title_rot = 0,
+  border = T,
+  clustering_method_rows = "complete",
+  use_raster = T
+)
+
+draw(h)
+
+pdf("plots/Fig4/TCGA_dec_with_nature_subtypes.pdf", width = 6, height = 4)
+draw(h)
+dev.off()
+```
+
+## survival
+
+```{r}
+dir.create("plots/Fig4/Surv/ADEX_2", showWarnings = F, recursive = T)
+
+temp_markers$survival_p = NA
+
+for (i in unique(temp_markers$Symbol[temp_markers$group == "ADEX_2"])) {
+
+  clinical$group = "Low"
+
+  clinical[colnames(paad)[paad[i, ] > median(paad[i, ])], "group"] = "High"
+  # clinical$group = factor(clinical$group, levels=c(as.character(i), "Others"))
+  p <- TCGAanalyze_survival(
+      clinical,
+      clusterCol = "group",
+      filename = NULL,
+      risk.table = F,
+      conf.int = F,
+      ncensor.plot = F,
+      labels = c(as.character(i), "Others"),
+      color = c("red", "blue"),
+      conf.int.style = "step",  # customize style of confidence intervals
+  )
+  p <- p$plot
+  p <- p +
+      ggplot2::theme_bw(base_family = "Arial Unicode MS") +
+      ggplot2::theme(
+          aspect.ratio = 1,
+          axis.text = element_text(size = 15),
+          axis.title = element_text(size = 15),
+          legend.position = c(0.75, 0.9),
+          legend.title = element_blank(),
+          legend.text = element_text(size = 15),
+          plot.title = element_text(size = 15, hjust = 0.5),
+          panel.grid = element_blank()
+      ) + labs(title = i)
+  
+  # print(p)
+  
+  # temp_markers$survival_p[temp_markers$group == "ADEX_2" & temp_markers$Symbol == i] = as.numeric(str_replace_all(p$layers[[4]]$computed_geom_params$label, "[^\\d\\.]", ""))
+  
+  ggsave(
+    filename = paste0("plots/Fig4/Surv/ADEX_2/", i, ".pdf"),
+    width = 4, height = 4, plot = p, device = cairo_pdf
+  )
+}
+
+write.xlsx(temp_markers, "plots/Fig4/TCGA_dec_with_nature_subtypes.xlsx")
+```
+
+
+
+```{r kmeans, fig.height=6, fig.width=6}
+set.seed(42)
+
+bulk_dec <- readRDS("bulk/GEO_deconvolution.rds")
+temp = kmeans(bulk_dec$Est.prop.weighted, centers = 3)
+
+h <- Heatmap(
+  bulk_dec$Est.prop.weighted, 
+  name = "Weight",
+  show_row_names = F, 
+  row_split = sapply(rownames(bulk_dec$Est.prop.weighted), function(x) {
+    temp$cluster[[x]]
+  }),
+  border = T, # clustering_method_rows = "average",
+  cluster_rows = F, 
+  use_raster = T
+)
+
+draw(h)
+
+# cairo_pdf("plots/Fig4/tcga_weight.pdf", width = 5, height = 4)
+# draw(h)
+# dev.off()
+```
+
+
+## Test on nature data
+
+
+```{r kmeans, fig.height=6, fig.width=6}
+set.seed(42)
+
+bulk_dec <- readRDS("bulk/Nature.rds")
+temp = kmeans(bulk_dec$Est.prop.weighted, centers = 3)
+
+h <- Heatmap(
+  bulk_dec$Est.prop.weighted, 
+  name = "Weight",
+  show_row_names = F, 
+  row_split = sapply(rownames(bulk_dec$Est.prop.weighted), function(x) {
+    temp$cluster[[x]]
+  }),
+  border = T, # clustering_method_rows = "average",
+  cluster_rows = F, 
+  use_raster = T
+)
+
+draw(h)
+```
+
+
+## Our bulk
+
+```{r kmeans, fig.height=6, fig.width=6}
+set.seed(42)
+
+bulk_dec <- readRDS("bulk/WCH.rds")
+# temp = kmeans(bulk_dec$Est.prop.weighted, centers = 3)
+
+h <- Heatmap(
+  bulk_dec$Est.prop.weighted, 
+  name = "Weight",
+  show_row_names = F, 
+  # row_split = sapply(rownames(bulk_dec$Est.prop.weighted), function(x) {
+  #   temp$cluster[[x]]
+  # }),
+  border = T, # clustering_method_rows = "average",
+  cluster_rows = F, 
+  use_raster = T
+)
+
+draw(h)
+
+cairo_pdf("plots/Fig4/tcga_weight.pdf", width = 5, height = 4)
+draw(h)
+dev.off()
+```
+
+## Make heatmap of sc percentage and bulk weight
+```{r}
+temp <- meta[meta$patient_id %in% c("P6", "P7"), ] %>%
+    group_by(patient_id, subtype, disease) %>%
+    add_tally() %>%
+    mutate(sizeFactor = n) %>%
+    dplyr::select(patient_id, subtype, disease, assign.cell, sizeFactor) %>%
+    group_by(assign.cell, patient_id, subtype, disease) %>%
+    add_tally() %>%
+    mutate(scale.n = n / sizeFactor) %>%
+    # dplyr::select(patient_id, subtype, disease, assign.cell, sizeFactor, n, scale.n) %>%
+    unique() %>%
+    as.data.frame()
+    
+temp$clt = paste(temp$patient_id, temp$subtype, temp$disease)
+temp1 = dcast(temp, clt~assign.cell, value.var = "scale.n", fun.aggregate = mean, fill = 0)
+
+rownames(temp1) <- temp1$clt
+temp1 = temp1[, colnames(temp1) != "clt"]
+
+bulk_dec <- readRDS("bulk/WCH.rds")
+
+temp2 = melt(as.matrix(temp1))
+temp2 = rbind(temp2, melt(as.matrix(bulk_dec$Est.prop.weighted)))
+
+temp2$patient = sapply(temp2$Var1, function(x) {
+  str_to_upper(str_split(x, "[\\s_]")[[1]][1])
+})
+
+temp2$subtype = sapply(temp2$Var1, function(x) {
+  str_to_title(str_split(x, "[\\s_]")[[1]][2])
+})
+
+temp2$source = ifelse(str_detect(temp2$Var1, "bam"), "Bulk RNA-seq", "scRNA-seq")
+
+temp2 = dcast(temp2, patient+subtype+source~Var2, fun.aggregate = mean, fill = 0)
+temp2$subtype = as.character(temp2$subtype)
+```
+
+
+
+```{r fig.height=4, fig.width=5}
+temp2$subtype[temp2$subtype == "Cancer"] = "Primary"
+temp2$subtype[temp2$subtype %in% c("Parallel", "Paralle")] = "Adjacent"
+
+ra = rowAnnotation(
+  Patient = temp2$patient,
+  Subtype = temp2$subtype,
+  Source = temp2$source,
+  col = list(
+    Patient = c("P6"="#FACA50", "P7"="#C9D5D4"),
+    Subtype = c(
+        "Normal"="#3BAAD2", "Adjacent"="#4EAE4A",
+        "Primary"="#E79129", "Transfer"="#C82A2D"
+    ),
+    Source = c("Bulk RNA-seq"="#85D4E3", "scRNA-seq"="#F4B5BD")
+  )
+)
+
+h <- Heatmap(
+  as.matrix(temp2[, !colnames(temp2) %in% c("patient", "subtype", "source")]),
+  name = "Weight", right_annotation = ra,
+)
+
+draw(h)
+
+cairo_pdf("plots/Fig4/WCH_dec.pdf", width = 5, height = 4)
+draw(h)
+dev.off()
+```
+
+
+## merge TCGA with our data
+
+```{r kmeans, fig.height=6, fig.width=6}
+set.seed(42)
+bulk_dec <- readRDS("deconvolution.rds")
+
+wch_dec <- readRDS("bulk/WCH.rds")
+
+
+weight = rbind(bulk_dec$Est.prop.weighted, wch_dec$Est.prop.weighted)
+
+# temp = kmeans(bulk_dec$Est.prop.weighted, centers = 3)
+
+temp = kmeans(weight, centers = 4)
+
+
+source = as.character(sapply(rownames(weight), function(x) {
+  if(str_detect(x, "^TCGA")) {
+    return("TCGA")
+  }
+  return("WCH")
+}))
+source_col = as.character(wes_palette("Moonrise3"))[1:length(unique(source))]
+names(source_col) = unique(source)
+
+ra = rowAnnotation(
+  Source=source,
+  col = list(Source = source_col)
+)
+
+
+h <- Heatmap(
+  weight, 
+  name = "Weight",
+  show_row_names = F, 
+  row_split = sapply(rownames(weight), function(x) {
+    temp$cluster[[x]]
+  }),
+  border = T, # clustering_method_rows = "average",
+  cluster_rows = F, 
+  use_raster = T,
+  right_annotation = ra
+)
+
+draw(h)
+
+cairo_pdf("plots/Fig4/all_weight.pdf", width = 5, height = 4)
+draw(h)
+dev.off()
+```
+
+
+```{r surv, fig.height=6, fig.width=4}
+dir.create("plots/Fig4/Surv", showWarnings = F, recursive = T)
+
+for (i in unique(temp$cluster)) {
+  # samples = rownames(bulk_dec$Est.prop.weighted)[ro[[i]]]
+  
+  clinical$group = "Others"
+  samples = c()
+  for (j in names(temp$cluster)) {
+    if (temp$cluster[[j]] == i) {
+      samples = c(samples, j)
+    }
+  }
+  clinical[intersect(samples, rownames(clinical)), "group"] = i
+  clinical$group = as.character(clinical$group)
+  
+  p <- TCGAanalyze_survival(
+      clinical,
+      "group",
+      filename = NULL,
+      risk.table = F,
+      conf.int = F,
+      ncensor.plot = F,
+      labels = c(i, "Others"),
+      color = c("red", "blue"),
+      # conf.int.style = "step",  # customize style of confidence intervals
+  )
+  p <- p$plot
+  p <- p +
+      ggplot2::theme_bw() +
+      ggplot2::theme(
+          aspect.ratio = 1,
+          axis.text = element_text(size = 15),
+          axis.title = element_text(size = 15),
+          legend.position = c(0.75, 0.9),
+          legend.title = element_blank(),
+          legend.text = element_text(size = 15),
+          plot.title = element_text(size = 15, hjust = 0.5),
+          panel.grid = element_blank()
+      ) + labs(title = i)
+  
+  print(p)
+  
+  ggsave(
+    filename = paste0("plots/Fig4/Surv/", i, ".pdf"),
+    width = 4, height = 4, plot = p, device = cairo_pdf
+  )
+}
+```
+
+
+
+#### Compare the groups with Nature subtypes
+```{r}
+load_markers <- function(path) {
+  wb = loadWorkbook(path)
+  data = NULL
+  for (i in c("ADEX", "Immunogenic", "Squamous", "Progenitor")) {
+    temp = readWorkbook(wb, paste0("PDAC_", i, "vRest"))
+    temp$group = i
+    data = rbind(data, temp)
+  }
+  
+  return(data)
+}
+
+markers = load_markers ("bulk/41586_2016_BFnature16965_MOESM271_ESM.xlsx")
+
+markers <- markers[markers$Symbol %in% rownames(paad), ]
+
+temp_markers <- markers[markers$adj.P.Val < 0.05, ] %>%
+  group_by(group) %>%
+  top_n(50, wt = logFC) %>%
+  as.data.frame()
+```
+
+
+```{r fig.height=4, fig.width=6}
+common_genes = intersect(rownames(paad), rownames(expr))
+temp_expr = cbind(paad[common_genes, ], expr[common_genes, ])
+
+
+
+source = as.character(sapply(colnames(temp_expr), function(x) {
+  if(str_detect(x, "^TCGA")) {
+    return("TCGA")
+  }
+  return("WCH")
+}))
+source_col = as.character(wes_palette("Moonrise3"))[1:length(unique(source))]
+names(source_col) = unique(source)
+
+ta = HeatmapAnnotation(
+  Source=source,
+  col = list(Source = source_col)
+)
+
+
+col_fun = colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
+h <- Heatmap(
+  t(scale(t(temp_expr[temp_markers$Symbol, ]))),
+  name = "Expr",
+  col = col_fun, 
+  row_split = temp_markers$group,
+  column_split = sapply(colnames(temp_expr), function(x) {
+    if (!str_detect(x, "^TCGA")) {
+      x = paste0(x, "_Aligned.sortedByCoord.out.bam")
+    }
+    temp$cluster[[x]]
+  }),
+  show_row_names = F,
+  show_column_names = F,
+  cluster_rows = F, cluster_columns = F,
+  row_title_rot = 0,
+  border = T,
+  top_annotation = ta
+)
+
+draw(h)
+
+cairo_pdf("plots/Fig4/all_dec_with_nature_subtypes.pdf", width = 6, height = 4)
+draw(h, merge_legend = T)
+dev.off()
+```
+
+
+
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.

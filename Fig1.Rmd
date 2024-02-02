@@ -1,0 +1,801 @@
+---
+title: "Fig1"
+author: "zhangyiming"
+date: "2020/5/10"
+output: html_document
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{R include=FALSE}
+library(Seurat)
+library(stringr)
+library(harmony)
+library(ggplot2)
+library(ggrastr)
+library(openxlsx)
+library(doMC)
+library(ggsci)
+library(ggrepel)
+library(dplyr)
+library(ggthemes)
+library(ComplexHeatmap)
+library(circlize)
+library(wesanderson)
+library(reshape2)
+library(AUCell)
+
+extrafont::loadfonts()
+
+source("ModifiedDotData.R")
+
+subtype_col = c(
+    "Normal"="#3BAAD2", "Adjacent"="#4EAE4A", 
+    "Primary"="#E79129", "Metastasis"="#C82A2D"
+)
+```
+
+
+```{r}
+umap <- readRDS("umap.rds")
+meta <- readRDS("meta.rds")
+
+expr <- readRDS("raw_expr_sparse.rds")
+
+meta$disease <- as.character(meta$disease)
+meta$disease[meta$patient_id %in% c("P5", "P8", "P14")] = "ASC"
+```
+
+
+```{R}
+
+make_cell_types_plot3 <- function(
+    coord,
+    pt.size = 0.1, 
+    alpha = 0.5,
+    text_size = 10,
+    axis_size = 18,
+    axis_title_size = 20,
+    title_size = 25,
+    group_by = "",
+    label = "cell_name",
+    title = "Cell type",
+    legend.position = "none",
+    colors = NULL
+) {
+    data = coord[, c("UMAP1", "UMAP2", group_by, label)]
+    
+    if (group_by == "") {
+        group_by = "cell"
+    }
+    
+    p <- eval(
+        parse(text=paste0(
+                "ggplot(data = data, aes(x=UMAP1, y=UMAP2, color=", group_by, "))"
+            )
+        )
+    )
+    
+    if (!is.null(label)) {
+
+        text_loc = eval(
+            parse(text=paste0("data %>% group_by(", label, ") %>% mutate(x = median(UMAP1), y = median(UMAP2)) %>% dplyr::select(x, y, ", label, ")"))
+        )
+        
+        text_loc = text_loc %>% unique() %>% as.data.frame()
+        
+        # print(text_loc)
+    }
+    
+    p <- p + geom_point_rast(size = pt.size, alpha = alpha)
+    
+    if (!is.null(label)) {
+        p <- p + eval(parse(text=paste0("geom_text_repel(data = text_loc,  aes(x=x, y=y, label = ", label, "), color = \"black\", size = text_size, alpha = 1)")))
+    }
+    
+    p <- p + 
+        theme_bw() +
+        labs(
+            title = title
+        ) +
+        theme(
+            plot.title = element_text(hjust = 0.5, face="bold", size = title_size),
+            legend.position = legend.position,
+            axis.text = element_text(size = axis_size),
+            axis.title = element_text(size = axis_title_size),
+            panel.grid = element_blank(),
+            aspect.ratio=1
+        )
+    
+    if (!is.null(colors)) {
+        p <- p + scale_color_manual(values = colors)
+    }
+    p
+}
+
+```
+
+
+## cell type umap
+```{r fig.height=6, fig.width=6}
+umap = as.data.frame(umap)
+umap$cell <- meta[rownames(umap), "assign.cell"]
+colnames(umap)[1:2] = c("UMAP1", "UMAP2")
+
+cell_colors = tableau_color_pal(palette = "Tableau 20")(length(unique(meta$assign.cell)))
+
+# cell_colors = cell_colors[1:length(unique(meta$cell_name1))]
+names(cell_colors) <- sample(as.character(unique(meta$assign.cell)))
+
+
+p <- make_cell_types_plot3(umap, group_by = "cell", label = "cell", colors = cell_colors, text_size = 8)
+
+p
+ggsave(
+    filename = "plots/Fig1/cell_type_umap.pdf",
+    width = 6, height = 6, plot = p
+)
+```
+
+
+## subtype umap
+```{r}
+umap$subtype = meta[rownames(umap), "subtype"]
+colnames(umap)[1:2] = c("UMAP1", "UMAP2")
+
+p <- make_cell_types_plot3(
+    umap[umap$subtype != "Tumor", ], 
+    group_by = "subtype", 
+    label = "subtype", text_size = 0,
+    legend.position = "bottom",
+    colors = subtype_col
+) +
+    guides(
+        color = guide_legend(
+            override.aes = list(size = 5, fill=NA),
+            nrow = 1
+        )
+    ) + labs(color = "")
+
+p
+
+ggsave(
+    filename = "plots/Fig1/subtype_umap.pdf",
+    width = 6, height = 7, plot = p, device = cairo_pdf
+)
+```
+
+
+
+## umap umap
+```{r}
+umap$nUMI= log10(meta[rownames(umap), "nCount_RNA"] + 1)
+colnames(umap)[1:2] = c("UMAP1", "UMAP2")
+
+p <- make_cell_types_plot3(
+    umap, 
+    title_size = 25, 
+    text_size = 8, 
+    group_by = "nUMI",
+    label = NULL, 
+    title = "Transcripts counts",
+    legend.position = c(0.8, 0.05)
+)
+
+p <- p + theme(
+    legend.direction = "horizontal",
+    legend.text = element_text(size = 15),
+    legend.title = element_text(size = 15)
+) + 
+    labs(color = "log10(counts + 1)") +
+    scale_colour_gradient(
+        low = "lightgrey",
+        high = "blue"
+    ) + 
+    guides(color = guide_colorbar(
+        title.position = "bottom",
+        barwidth = 10
+    ))
+
+p
+ggsave(
+    filename = "plots/Fig1/nUMI_umap.pdf",
+    width = 6, height = 6, plot = p, device = cairo_pdf
+)
+```
+
+
+## patient umap
+```{r fig.height=6, fig.width=6}
+colnames(umap)[1:2] = c("UMAP1", "UMAP2")
+umap$patient_id = meta[rownames(umap), "patient_id"]
+
+
+p <- make_cell_types_plot3(
+    umap, group_by = "patient_id", 
+    label = "patient_id", text_size = 8
+)
+
+p
+
+ggsave(
+    filename = "plots/Fig1/patients_umap.pdf",
+    width = 6, height = 6, plot = p, device = cairo_pdf
+)
+```
+
+
+## Markers heatmap
+```{r fig.height=4, fig.width=8}
+obj@meta.data$assign.cell = as.character(obj@meta.data$CellType)
+meta = obj@meta.data
+expr = obj@assays$RNA@counts
+genes = c("AMBP", "KRT19", "PRSS1", "CHGB", "CDH5", "LUM", "RGS5", "AIF1", "CD3D",  "CD79A", "CD19")
+
+genes = intersect(genes, rownames(expr))
+
+genes = factor(genes, levels = genes)
+
+## Select 1000 cells each cell type
+set.seed(4)
+temp_meta <- meta %>%
+    group_by(assign.cell) %>%
+    sample_n(1000) %>%
+    unique() %>%
+    as.data.frame()
+
+temp_meta$assign.cell = factor(
+    as.character(temp_meta$assign.cell),
+    levels = c(
+        "Ductal 1", "Ductal 2", "Acinar", "Endocrine", "Endothelial",
+        "Fibroblast", "Stellate", "Macrophage", "T", "B"
+    )
+)
+
+
+temp_expr = as.matrix(expr[as.character(genes), temp_meta$cells])
+temp_expr = as.matrix(t(scale(t(temp_expr))))
+
+col_fun = colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+
+pdf("plots/Fig1/markers_heatmap.pdf", width = 8, height = 4)
+h <- Heatmap(
+    temp_expr,
+    name = "Expr",
+    col = col_fun,
+    cluster_rows = F,
+    border = T,
+    use_raster = T,
+    cluster_columns = F,
+    row_split = genes,
+    column_split = temp_meta$assign.cell,
+    show_column_names = F,
+    row_title_gp = gpar(fontsize = 0),
+    column_title_rot = 90,
+    column_title_side = "bottom"
+)
+draw(h)
+dev.off()
+
+draw(h)
+```
+
+
+### Select markers
+```{R}
+markers = read.xlsx("meta/markers.xlsx")
+colnames(markers)[1:2] = c("Cells", "Markers")
+```
+
+```{r}
+temp = ModifyDotData(
+    obj, 
+    features = markers$Markers, 
+    group.by = "assign.cell"
+)
+
+temp = merge(temp, markers, by.x = "features.plot", by.y = "Markers")
+```
+
+
+
+```{r fig.height=30, fig.width=12}
+# cairo_pdf("plots/Markers_DotPlot_08.pdf", height = 30, width = 12)
+ggplot(temp, aes(x=id, y=features.plot, size = pct.exp, color=avg.exp.scaled)) +
+    geom_point() +
+    scale_radius(range = c(0, 6), limits = c(NA, NA)) +
+    scale_color_gradient(low = "lightgrey", high = "blue") +
+    facet_grid(Cells~., scales = "free", space = "free") +
+    theme_bw(base_family = "Arial Unicode MS") +
+    theme(
+        axis.text = element_text(size = 15),
+        strip.text.y = element_text(size = 15),
+        legend.title = element_text(size = 20),
+        legend.text = element_text(size = 15),
+        panel.grid = element_blank(),
+        axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)
+    ) +
+    labs(x="", y="", color = "avg.exp")
+# dev.off()
+```
+
+
+### make final dot plot
+```{r fig.height=8, fig.width=12}
+genes = c(
+    "AMBP"="Ductal 1", "LEFTY1"="Ductal 1", "SLC4A4"="Ductal 1", 
+    "CLU"="Ductal 1", "FXYD2"="Ductal 1", 
+    "KRT19"="Ductal 2", "MUC1"="Ductal 2", "CEACAM1"="Ductal 2", 
+    "CEACAM5"="Ductal 2", "CEACAM6"="Ductal 2", "FXYD3"="Ductal 2",  # "Ductal 2
+    "PRSS1"="Acinar", "CTRB2"="Acinar", "CTRB1"="Acinar", 
+    "REG1B"="Acinar", "CELA3A"="Acinar", # Acinar
+    "CHGB"="Endoricine","SLC30A8"="Endoricine", "CHGA"="Endoricine",
+    "PCSK1N"="Endoricine", # Endoricine
+    "CDH5"="Endothelial", "CD31"="Endothelial", "PLVAP"="Endothelial",
+    "AQP1"="Endothelial", "CLDN5"="Endothelial", # Endothelial
+    "LUM"="Fibroblasts", "FAP"="Fibroblasts", "FDGFRA"="Fibroblasts",
+    "DCN"="Fibroblasts", "COL1A1"="Fibroblasts", # Fibroblasts
+    "RGS5"="Stellate", "ACTA2"="Stellate", # Stellate
+    "AIF1"="Macrophages", "FCER1G"="Macrophages", "CD14"="Macrophages",
+    "CD163"="Macrophages", "FCGR2A"="Macrophages",  # Mφ
+    "CD3D"="T cells",  "CD3E"="T cells", "CD2"="T cells", "GZMH"="T cells", # T cells
+    "CD79A"="B cells", "MS4A1"="B cells"   # B 
+)
+
+sel_genes = intersect(names(genes), rownames(expr))
+
+sel_genes = factor(sel_genes, levels = sel_genes)
+
+## Select 1000 cells each cell type
+set.seed(4)
+temp_meta <- meta %>%
+    group_by(assign.cell) %>%
+    sample_n(1000) %>%
+    unique() %>%
+    as.data.frame()
+
+temp_meta$assign.cell = factor(
+    as.character(temp_meta$assign.cell),
+    levels = c(
+        "Ductal 1", "Ductal 2", "Acinar", "Endocrine", "Endothelial",
+        "Fibroblast", "Stellate", "Macrophage", "T", "B"
+    )
+)
+
+temp_meta = temp_meta[order(temp_meta$assign.cell), ]
+
+temp_expr = as.matrix(expr[as.character(sel_genes), as.character(temp_meta$cells)])
+temp_expr = as.matrix(t(scale(t(temp_expr))))
+
+col_fun = colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+
+rs = as.character(sapply(as.character(sel_genes), function(x) { genes[x] }))
+rs = factor(rs, levels = unique(rs))
+
+pdf("plots/Fig1/markers_heatmap.pdf", width = 12, height = 8)
+h <- Heatmap(
+    temp_expr,
+    name = "Expr",
+    col = col_fun,
+    cluster_rows = F,
+    border = T,
+    use_raster = T,
+    cluster_columns = F,
+    row_split = rs,
+    column_split =temp_meta$assign.cell,
+    show_column_names = F,
+    row_title_gp = gpar(fontsize = 0),
+    # row_names_gp = gpar(fontfamily = "Arial Unicode MS"),
+    column_title_rot = 90,
+    column_title_side = "bottom",
+    # column_names_gp = gpar(fontfamily = "Arial Unicode MS")
+)
+draw(h)
+dev.off()
+
+draw(h)
+```
+
+
+## bar plot of subtype
+
+```{r fig.height=4, fig.width=6}
+temp = meta[as.character(meta$source) == "WCH" & as.character(meta$subtype) != "Tumor", ] %>%
+    group_by(assign.cell, subtype) %>%
+    add_tally() %>%
+    dplyr::select(assign.cell, subtype, n) %>%
+    unique() %>%
+    group_by(assign.cell) %>%
+    mutate(p = n / sum(n) * 100) %>%
+    as.data.frame()
+
+lvs = levels(temp$subtype)
+
+temp$subtype = factor(
+    as.character(temp$subtype),
+    levels = rev(c("Normal", "Adjacent", "Primary",  "Metastasis",  "Tumor"))
+)
+
+temp$assign.cell = factor(
+    as.character(temp$assign.cell),
+    levels = c(
+        "Ductal 1", "Ductal 2", "Acinar", "Endocrine", "Endothelial",
+        "Fibroblast", "Stellate", "Macrophage", "T", "B"
+    )
+)
+
+
+p <- ggplot(temp, aes(x=assign.cell, y=p, fill=subtype)) +
+    geom_bar(stat = "identity") +
+    scale_fill_manual(values = subtype_col) +
+    theme_bw(base_family = "Arial Unicode MS") +
+    theme(
+        panel.grid = element_blank(),
+        axis.text.x = element_text(size = 12, angle = 30, hjust = 1, vjust = 1),
+        axis.text.y = element_text(size = 12),
+        legend.position = "bottom",
+        legend.text = element_text(size = 15)
+    ) +
+    labs(x = "", y = "", fill="")
+
+p
+
+
+ggsave(
+    filename = "plots/Fig1/sutype_barplot.pdf",
+    width = 6, height = 4, plot = p, device = cairo_pdf
+)
+```
+
+
+## cellular proportion by patients
+```{r stats}
+temp <- meta[as.character(meta$source) == "WCH" & as.character(meta$subtype) != "Tumor", ] %>%
+    dplyr::select(patient_id, subtype, disease, assign.cell) %>%
+    group_by(assign.cell, patient_id, subtype, disease) %>%
+    add_tally() %>%
+    group_by(patient_id, subtype, disease) %>%
+    mutate(scale.n = n / sum(n) * 100) %>%
+    unique() %>%
+    as.data.frame()
+```
+
+
+```{r fig.height=3, fig.width=4}
+temp$subtype = factor(temp$subtype, levels = c("Normal", "Adjacent", "Primary", "Metastasis", "Tumor"))
+
+lvls = levels(temp$subtype)
+lvls = lvls[lvls != "Tumor"]
+
+comp = list()
+for (i in 1:length(lvls)) {
+  for (j in 2:length(lvls)) {
+    if (i == j) {
+      break
+    }
+    
+    comp[[length(comp) + 1]] = c(lvls[i], lvls[j])
+  }
+}
+
+
+plist = list()
+for (i in unique(temp$assign.cell)) {
+  p <- ggboxplot(
+    temp[temp$assign.cell == i & temp$subtype != "Tumor", ],
+    x="subtype", 
+    y="scale.n", 
+    color = "subtype", 
+    title = i,
+    nrow = 1,
+    palette = c(
+        "Normal"="#3BAAD2", "Adjacent"="#4EAE4A",
+        "Primary"="#E79129", "Metastasis"="#C82A2D",
+        "Tumor"="red"
+    ),
+    legend = "none",
+    ylab = "Fraction of cells (%)",
+    xlab = ""
+  )
+  
+   anno_df = compare_means(
+     `scale.n` ~ subtype, 
+     data = temp[temp$assign.cell == i & temp$subtype != "Tumor", ], 
+     p.adjust.method = "BH"
+    ) %>%
+      filter(p.adj < 0.05) %>%
+        as.data.frame()
+    
+   # compute lower and upper whiskers
+   ylim1 = boxplot.stats(temp[temp$assign.cell == i & temp$subtype != "Tumor", "scale.n"])$stats[c(1, 5)]
+
+  if (nrow(anno_df) > 0) {
+    anno_df$y_pos = max(ylim1)
+
+    anno_df = anno_df %>%
+            mutate(y_pos = y_pos + ((1:n()) - 1) * .05)
+    
+    p = p + # ylim(0, max(anno_df$y_pos) + 100) +
+      ggsignif::geom_signif(
+        data=anno_df,
+        aes(xmin=group1, xmax=group2, annotations=format(p.adj, digits = 2), y_position=abs(log10(y_pos))),
+        manual=TRUE, inherit.aes = T
+      )
+  }
+  
+  p <- p +
+     # coord_cartesian(ylim = ylim1*5)
+      scale_y_log10()
+  
+  plist[[length(plist) + 1]] = p
+}
+
+
+ggsave(
+  plot = cowplot::plot_grid(plotlist = plist, nrow = 2),
+  width = 20, height = 6,
+  filename = "plots/cell_composition_box.pdf"
+)
+```
+
+
+## Meta plots
+
+```{r}
+meta <- read.xlsx("meta/Table S1.xlsx", sheet = 2)
+
+meta$Subtype = sapply(meta$Sample, function(x) {
+    x = str_split(x, "-")[[1]][2]
+    
+    subtypes = c("N"="Normal", "T"="Transfer", "C"="Cancer", "P"="Paralle")
+    
+    subtypes[[x]]
+})
+
+meta$Location = str_trim(meta$Location, side = "both")
+
+meta$PatientID = sapply(meta$Sample, function(x) {
+    x = str_split(x, "-")[[1]][1]
+    str_replace(x, "DAC0", "")
+})
+
+
+temp = as.matrix(meta[, c(
+    "Gender", "sc-RNAseq", "WES", 
+    "ATAC-seq", "Subtype", "Age", 
+    "Location", "RNA-seq", "Stage"
+)])
+rownames(temp) <- meta$PatientID
+temp = melt(temp)
+temp$Var2 = as.character(temp$Var2)
+temp$Var2[temp$Var2 == "Subtype"] = as.character(temp$value[temp$Var2 == "Subtype"])
+
+temp = merge(temp, unique(meta[, c("Cancer.Type", "PatientID")]), by.x = "Var1", by.y = "PatientID")
+
+
+# gg_color_hue <- function(n) {
+#   hues = seq(15, 375, length = n + 1)
+#   hcl(h = hues, l = 65, c = 100)[1:n]
+# }
+
+location_cols = as.character(wes_palette("Moonrise3"))[1:length(unique(meta$Location))]
+names(location_cols) = unique(meta$Location)
+
+subtype_col = c(
+    "Normal"="#3BAAD2", "Paralle"="#4EAE4A",
+    "Cancer"="#E79129", "Transfer"="#C82A2D"
+)
+
+gender_color = c("Male"="#0997F9", "Female"="#E12E9B")
+
+have_color = c("Yes"="#778C93", "No"="grey75")
+stage_color = c(
+    "I"="#65A9A3", "II"="#4A933E", 
+    "III"="#EC7A21", "IV"="#D73F47"
+)
+```
+
+
+```{r fig.height=6, fig.width=10}
+sequences = c("sc-RNAseq", "RNA-seq", "WES", "ATAC-seq")
+
+temp$value = str_trim(temp$value, side = "both")
+temp$group = "Clinical"
+temp$group[temp$Var2 %in% names(subtype_col)] = "Subtype"
+temp$group[temp$Var2 %in% sequences] = "Sequence"
+temp$group[temp$value %in% meta$Location] = "Location"
+
+temp = temp[temp$value != "No", ]
+
+cols = c(subtype_col, location_cols, have_color, gender_color, stage_color)
+
+for (i in colnames(temp)) {
+    temp[, i] = as.character(temp[, i])
+}
+
+lvls = unique(temp$Var2)
+lvls = lvls[!lvls %in% names(subtype_col)]
+
+lvls = lvls[!lvls %in% sequences]
+lvls = c(lvls, sequences, names(subtype_col))
+
+temp$Var2 = factor(as.character(temp$Var2), levels = lvls)
+
+temp = temp[order(temp$Var2), ]
+
+p <- ggplot() +
+    geom_point(
+        data = temp[temp$group == "Subtype", ], 
+        aes(
+            x=Var1, 
+            y=factor(as.character(Var2), levels = rev(names(subtype_col))),
+            color = value
+        ), 
+        shape = 15, size = 5
+    ) +
+    geom_point(
+        data = temp[temp$Var2 == "Location", ],
+        aes(x=Var1, y=value, color = value), 
+        shape = 15, size = 5, show.legend = F
+    ) +
+    geom_text(
+        data = temp[temp$Var2 == "Age", ],
+        aes(x=Var1, y=Var2, label = value), 
+        size = 5
+    ) +
+    geom_point(
+        data = temp[temp$Var2 == "Gender", ],
+        aes(x=Var1, y=Var2, color = value), 
+        shape = 15, size = 5
+    ) +
+    geom_point(
+        data = temp[temp$Var2 == "Stage", ],
+        aes(x=Var1, y=Var2, color = value), 
+        shape = 15, size = 5
+    ) +
+    geom_point(
+        data = temp[temp$group == "Sequence", ],
+        aes(
+            x=Var1, 
+            y=factor(as.character(Var2), levels = rev(sequences)), 
+            color = value
+        ), 
+        shape = 15, size = 5, show.legend = F
+    ) +
+    facet_grid(group~Cancer.Type, scales = "free", space = "free") +
+    theme_bw(base_family = "Arial Unicode MS") +
+    theme(
+        panel.grid = element_blank(), 
+        axis.text.y = element_text(size = 15),
+        axis.text.x = element_blank(),
+        panel.border = element_rect(colour = "black", fill=NA, size=1),
+        legend.text = element_text(size = 20),
+        strip.text = element_text(size = 15),
+        strip.background = element_rect(fill = "grey75"),
+        axis.title = element_text(size = 20),
+        legend.position = "top"
+    ) +
+    scale_color_manual(
+        values = cols, 
+        breaks = names(cols)[names(cols) %in% c(meta$Gender, meta$Stage)] # control legend labels
+    ) +
+    labs(x = "", y = "", color = "")
+
+p
+
+ggsave(
+    filename = "plots/Fig1/meta.pdf",
+    width = 10, height = 6, plot = p, device = cairo_pdf
+)
+```
+
+
+
+## AUCell
+
+
+```{r}
+cells_rankings = readRDS("cells_rankings.rds")
+```
+
+```{r}
+genes = c(
+    "AMBP"="Ductal 1", "LEFTY1"="Ductal 1", "SLC4A4"="Ductal 1", 
+    "CLU"="Ductal 1", "FXYD2"="Ductal 1", 
+    "KRT19"="Ductal 2", "MUC1"="Ductal 2", "CEACAM1"="Ductal 2", 
+    "CEACAM5"="Ductal 2", "CEACAM6"="Ductal 2", "FXYD3"="Ductal 2",  # "Ductal 2
+    "PRSS1"="Acinar", "CTRB2"="Acinar", "CTRB1"="Acinar", 
+    "REG1B"="Acinar", "CELA3A"="Acinar", # Acinar
+    "CHGB"="Endoricine","SLC30A8"="Endoricine", "CHGA"="Endoricine",
+    "PCSK1N"="Endoricine", # Endoricine
+    "CDH5"="Endothelial", "CD31"="Endothelial", "PLVAP"="Endothelial",
+    "AQP1"="Endothelial", "CLDN5"="Endothelial", # Endothelial
+    "LUM"="Fibroblasts", "FAP"="Fibroblasts", "FDGFRA"="Fibroblasts",
+    "DCN"="Fibroblasts", "COL1A1"="Fibroblasts", # Fibroblasts
+    "RGS5"="Stellate", "ACTA2"="Stellate", # Stellate
+    "AIF1"="Macrophages", "FCER1G"="Macrophages", "CD14"="Macrophages",
+    "CD163"="Macrophages", "FCGR2A"="Macrophages",  # Mφ
+    "CD3D"="T cells",  "CD3E"="T cells", "CD2"="T cells", "GZMH"="T cells", # T cells
+    "CD79A"="B cells", "MS4A1"="B cells"   # B 
+)
+
+genes = data.frame(gene = names(genes), cell = genes)
+
+geneSets = list()
+for(i in unique(genes$cell)) {
+    geneSets[[i]] = as.character(genes$gene[genes$cell == i])
+}
+
+# geneSets <- GSEABase::GeneSet(genes, setName="geneSet1") # alternative
+cells_AUC <- AUCell_calcAUC(geneSets, cells_rankings, aucMaxRank=nrow(cells_rankings)*0.05)
+
+set.seed(123)
+cells_assignment <- AUCell_exploreThresholds(cells_AUC, plotHist=F, nCores=20, assign=TRUE)
+
+saveRDS(cells_AUC, "cells_AUC.rds")
+saveRDS(cells_assignment, "cells_assignment.rds")
+```
+
+
+
+### Make AUCell plot
+```{r}
+cells_AUC = readRDS("cells_AUC.rds")
+cells_assignment = readRDS("cells_assignment.rds")
+umap <- readRDS("umap.rds")
+```
+
+
+```{R fig.height=4, fig.width=4}
+
+auc_data = getAUC(cells_AUC)
+selectedThresholds <- getThresholdSelected(cells_assignment)
+
+
+registerDoMC(5)
+foreach(i = names(selectedThresholds)) %dopar% {
+    
+# for (i in names(selectedThresholds)) {
+    print(i)
+    
+    auc <- as.data.frame(auc_data[i, ])
+    colnames(auc) <- "AUC"
+    
+    ## UMAP
+    data = as.data.frame(umap)
+    colnames(data) <- c("UMAP1", "UMAP2")
+    data$AUC <- auc[rownames(data), "AUC"]
+    
+    data$AUC[data$AUC < selectedThresholds[i]] <- 0
+    
+    data = data[order(data$AUC, decreasing = F), ]
+    
+    title = i
+    
+    p <- ggplot(
+        data, aes(x=UMAP1, y=UMAP2, color=AUC, alpha = 0.5)
+    ) + geom_point_rast(size = 0.1) +
+        theme_bw(base_family = "Arial Unicode MS") +
+        theme(
+            plot.title = element_text(hjust = 0.5, face="bold", size = 20),
+            panel.grid = element_blank(),
+            legend.position = "none",
+            axis.text = element_text(size = 12),
+            axis.title = element_text(size = 15),
+            legend.text = element_text(size = 15),
+            legend.title = element_text(size = 15)
+        ) +
+        scale_color_gradient(low = "lightgrey", high = "blue") +
+        labs(title = paste0(title, " (AUC > ", round(selectedThresholds[i], 2), ")"))
+    
+    ggsave(
+        filename = paste0("plots/AUCell/", str_replace_all(title, "(\\s|/)", "_"), ".pdf"),
+        plot = p, width = 6, height = 6, device = cairo_pdf
+    )
+
+}
+
+```
+
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
